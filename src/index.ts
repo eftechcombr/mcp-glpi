@@ -25,8 +25,47 @@ import {
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { GlpiClient, GlpiConfig, ListOptions } from './glpi-client.js';
+import { GlpiError } from './http.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
+
+// ---------------------------------------------------------------------------
+// Validation Schemas
+// ---------------------------------------------------------------------------
+
+const listArgsSchema = z.object({
+  start: z.number().int().min(0).optional(),
+  limit: z.number().int().min(1).max(10000).optional(),
+  range: z.string().optional(),
+  sort: z.string().optional(),
+  order: z.enum(['ASC', 'DESC']).optional(),
+  expand_dropdowns: z.boolean().optional(),
+  criteria: z.array(z.unknown()).optional(),
+  fetch_all: z.boolean().optional(),
+}).passthrough();
+
+const ticketReadSchema = z.object({
+  id: z.number().int().min(1),
+  with_logs: z.boolean().optional(),
+}).passthrough();
+
+const ticketSearchSchema = z.object({
+  status: z.number().optional(),
+  assigned_user_id: z.number().optional(),
+  assigned_group_id: z.number().optional(),
+  requester_user_id: z.number().optional(),
+  category_id: z.number().optional(),
+  entity_id: z.number().optional(),
+  priority: z.number().optional(),
+  urgency: z.number().optional(),
+  date_from: z.string().optional(),
+  date_to: z.string().optional(),
+  text_search: z.string().optional(),
+  open_only: z.boolean().optional(),
+  start: z.number().int().min(0).optional(),
+  limit: z.number().int().min(1).max(10000).optional(),
+}).passthrough();
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -88,15 +127,40 @@ const TICKET_FIELDS = {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function envInt(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const n = parseInt(raw, 10);
+  if (isNaN(n) || n < 0) throw new Error(`${name} must be a non-negative integer, got "${raw}"`);
+  return n;
+}
+
 function getConfig(): GlpiConfig {
   const url = process.env.GLPI_URL;
   if (!url) throw new Error('GLPI_URL environment variable is required');
+  try {
+    new URL(url);
+  } catch {
+    throw new Error(`GLPI_URL is not a valid URL: "${url}"`);
+  }
+
+  const userToken = process.env.GLPI_USER_TOKEN;
+  const username = process.env.GLPI_USERNAME;
+  const password = process.env.GLPI_PASSWORD;
+  if (!userToken && !(username && password)) {
+    throw new Error(
+      'No authentication configured. Set GLPI_USER_TOKEN, or GLPI_USERNAME + GLPI_PASSWORD.'
+    );
+  }
+
   return {
     url,
     appToken: process.env.GLPI_APP_TOKEN,
-    userToken: process.env.GLPI_USER_TOKEN,
-    username: process.env.GLPI_USERNAME,
-    password: process.env.GLPI_PASSWORD,
+    userToken,
+    username,
+    password,
+    timeoutMs: envInt('GLPI_TIMEOUT_MS'),
+    maxRetries: envInt('GLPI_MAX_RETRIES'),
   };
 }
 
@@ -980,19 +1044,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       // ==== TICKETS — read ====
       case 'glpi_list_tickets': {
-        const opts = parseListArgs(args);
+        const validated = listArgsSchema.parse(args);
+        const opts = parseListArgs(validated);
         let tickets = await client.getTickets({ ...opts, order: opts.order ?? 'DESC' });
-        if (typeof args.status === 'number') {
-          tickets = tickets.filter((t: any) => t.status === args.status);
+        if (typeof validated.status === 'number') {
+          tickets = tickets.filter((t: any) => t.status === validated.status);
         }
         return text(tickets.map(formatTicketSummary));
       }
 
       case 'glpi_get_ticket': {
-        const id = args.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const validated = ticketReadSchema.parse(args);
+        const { id, with_logs } = validated;
         const [ticket, followups, tasks, solutions] = await Promise.all([
-          client.getTicket(id, { with_logs: args.with_logs as boolean }),
+          client.getTicket(id, { with_logs }),
           client.getTicketFollowups(id),
           client.getTicketTasks(id),
           client.getTicketSolutions(id),
@@ -1034,6 +1099,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'glpi_search_tickets': {
+        ticketSearchSchema.parse(args);
         const criteria: SearchCriterion[] = [];
         const push = (c: SearchCriterion) => {
           if (criteria.length > 0 && !c.link) c.link = 'AND';
@@ -1657,6 +1723,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   } catch (error) {
     if (error instanceof McpError) throw error;
+    if (error instanceof z.ZodError) {
+      const issues = error.issues
+        .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('; ');
+      throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for ${name}: ${issues}`);
+    }
+    if (error instanceof GlpiError) {
+      const detail = error.glpiCode
+        ? `${error.glpiCode}${error.glpiMessage ? ' — ' + error.glpiMessage : ''}`
+        : error.message;
+      throw new McpError(
+        ErrorCode.InternalError,
+        `GLPI API error on ${name} (HTTP ${error.status}): ${detail}`
+      );
+    }
     throw new McpError(
       ErrorCode.InternalError,
       `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`
@@ -1740,15 +1821,29 @@ async function main() {
   try {
     const config = getConfig();
     client = new GlpiClient(config);
-    await client.initSession();
-    console.error('GLPI session initialized');
+
+    // Try to open the session eagerly, but don't die if GLPI is momentarily
+    // unreachable: the HTTP layer re-authenticates lazily on first request.
+    try {
+      await client.initSession();
+      console.error('GLPI session initialized');
+    } catch (error) {
+      console.error(
+        `Warning: could not reach GLPI at startup (${error instanceof Error ? error.message : error}). ` +
+        'The session will be established on the first request.'
+      );
+    }
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error('MCP GLPI Server v3.0 running on stdio');
 
     const shutdown = async () => {
-      try { await client.killSession(); } catch {}
+      try {
+        await client.killSession();
+      } catch (error) {
+        console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
+      }
       process.exit(0);
     };
     process.on('SIGINT', shutdown);

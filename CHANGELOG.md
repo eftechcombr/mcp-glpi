@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.1.0 — 2026-07-04
+
+Reliability hardening after the v3.0.0 audit.
+
+### Added
+
+- **Request timeouts**: every HTTP call (including `initSession`) is wrapped in
+  an `AbortController` with a configurable timeout (`GLPI_TIMEOUT_MS`, default
+  15 s). A hung GLPI backend can no longer block the MCP server indefinitely.
+- **Retry on `429` and network errors**: rate-limited responses honour the
+  `Retry-After` header; transient network failures (ECONNRESET, timeouts) are
+  retried with the same exponential backoff as `5xx`.
+- **Runtime input validation (zod)** on ticket tools (`glpi_list_tickets`,
+  `glpi_get_ticket`, `glpi_search_tickets`): invalid arguments now return a
+  clear `InvalidParams` MCP error instead of failing downstream in GLPI.
+- **Differentiated MCP errors**: zod validation → `InvalidParams`;
+  `GlpiError` → message with HTTP status + GLPI code; everything else →
+  `InternalError`.
+- **Config validation at startup**: `GLPI_URL` must be a valid URL and an
+  authentication method must be configured — fail fast with a clear message.
+- **Debug logging** (`GLPI_DEBUG=1`): retries, re-authentication and
+  rate-limiting events are logged to stderr (stdout stays reserved for the MCP
+  stdio transport).
+- **Resilient startup**: if GLPI is unreachable when the server starts, a
+  warning is logged and the session is established lazily on the first request
+  (previously the server exited immediately).
+- New env vars: `GLPI_TIMEOUT_MS`, `GLPI_MAX_RETRIES`, `GLPI_DEBUG`.
+- 3 new HTTP-layer tests (timeout abort, 429 retry, network-error retry) — 7 total.
+
 ## 3.0.0 — 2026-06-08
 
 Major overhaul focused on the foundations and on ITSM/reporting coverage.

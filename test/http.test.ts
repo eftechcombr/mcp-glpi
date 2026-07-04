@@ -87,6 +87,89 @@ test('5xx triggers retry with backoff', async () => {
   assert.equal(attempts, 3);
 });
 
+test('429 is retried, honouring Retry-After', async () => {
+  let attempts = 0;
+
+  installFetch(async (url) => {
+    if (url.endsWith('/initSession')) {
+      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    }
+    attempts++;
+    if (attempts === 1) {
+      return new Response('rate limited', {
+        status: 429,
+        headers: { 'Retry-After': '0' },
+      });
+    }
+    return new Response(JSON.stringify([]), { status: 200 });
+  });
+
+  const http = new GlpiHttp({
+    url: 'https://glpi.test',
+    userToken: 'u',
+    retryBaseDelayMs: 1,
+  });
+  await http.initSession();
+  await http.request('Computer');
+  assert.equal(attempts, 2);
+});
+
+test('network error is retried with backoff', async () => {
+  let attempts = 0;
+
+  installFetch(async (url) => {
+    if (url.endsWith('/initSession')) {
+      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    }
+    attempts++;
+    if (attempts === 1) throw new TypeError('fetch failed: ECONNRESET');
+    return new Response(JSON.stringify([{ id: 1 }]), { status: 200 });
+  });
+
+  const http = new GlpiHttp({
+    url: 'https://glpi.test',
+    userToken: 'u',
+    retryBaseDelayMs: 1,
+  });
+  await http.initSession();
+  const result = await http.request<{ id: number }[]>('Computer');
+  assert.equal(result.data[0].id, 1);
+  assert.equal(attempts, 2);
+});
+
+test('request aborts after timeoutMs', async () => {
+  installFetch(async (url, init) => {
+    if (url.endsWith('/initSession')) {
+      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    }
+    // Simulate a hanging request that only resolves via abort signal.
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        reject(err);
+      });
+    });
+  });
+
+  const http = new GlpiHttp({
+    url: 'https://glpi.test',
+    userToken: 'u',
+    timeoutMs: 20,
+    maxRetries: 0,
+  });
+  await http.initSession();
+
+  await assert.rejects(
+    () => http.request('Computer'),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /timeout after 20ms/);
+      return true;
+    }
+  );
+});
+
 test('error body ["CODE","message"] is parsed into GlpiError', async () => {
   installFetch(async (url) => {
     if (url.endsWith('/initSession')) {

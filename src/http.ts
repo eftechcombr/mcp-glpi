@@ -17,6 +17,8 @@ export interface GlpiHttpConfig {
   maxRetries?: number;
   /** Initial backoff in ms (default 300). */
   retryBaseDelayMs?: number;
+  /** Request timeout in ms (default 15000). */
+  timeoutMs?: number;
 }
 
 export interface GlpiRawError {
@@ -71,6 +73,13 @@ export interface RequestResult<T> {
   status: number;
 }
 
+/** Debug logging to stderr (stdout is reserved for the MCP stdio transport). */
+function debugLog(message: string): void {
+  if (process.env.GLPI_DEBUG) {
+    console.error(`[glpi-http] ${new Date().toISOString()} ${message}`);
+  }
+}
+
 export class GlpiHttp {
   readonly config: GlpiHttpConfig;
   private sessionToken: string | null = null;
@@ -79,6 +88,7 @@ export class GlpiHttp {
     this.config = {
       maxRetries: 2,
       retryBaseDelayMs: 300,
+      timeoutMs: 15000,
       ...config,
       url: config.url.replace(/\/$/, ''),
     };
@@ -106,7 +116,7 @@ export class GlpiHttp {
     }
 
     const url = `${this.config.url}/apirest.php/initSession`;
-    const response = await fetch(url, { method: 'GET', headers });
+    const response = await this.fetchWithTimeout(url, { method: 'GET', headers });
 
     if (!response.ok) {
       throw await this.buildError(response, 'GET', url);
@@ -129,6 +139,27 @@ export class GlpiHttp {
 
   private async ensureSession(): Promise<void> {
     if (!this.sessionToken) await this.initSession();
+  }
+
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit
+  ): Promise<Response> {
+    const timeoutMs = this.config.timeoutMs ?? 15000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`Request timeout after ${timeoutMs}ms: ${url}`);
+      }
+      throw err;
+    }
   }
 
   /**
@@ -159,12 +190,26 @@ export class GlpiHttp {
     if (options.json !== undefined) init.body = JSON.stringify(options.json);
 
     const maxRetries = this.config.maxRetries ?? 2;
+    const baseDelay = this.config.retryBaseDelayMs ?? 300;
     let attempt = 0;
     let lastError: GlpiError | undefined;
     let reauthAttempted = false;
 
     while (attempt <= maxRetries) {
-      const response = await fetch(fullUrl, init);
+      let response: Response;
+      try {
+        response = await this.fetchWithTimeout(fullUrl, init);
+      } catch (err) {
+        // Network error or timeout -> retry with backoff.
+        if (attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt);
+          debugLog(`${method} ${path} network error (${err instanceof Error ? err.message : err}), retry in ${delay}ms`);
+          await new Promise((r) => setTimeout(r, delay));
+          attempt++;
+          continue;
+        }
+        throw err;
+      }
 
       if (response.ok) {
         const data = await this.parseBody<T>(response);
@@ -175,14 +220,26 @@ export class GlpiHttp {
       if (response.status === 401 && !reauthAttempted && !options.noSession) {
         reauthAttempted = true;
         this.sessionToken = null;
+        debugLog(`${method} ${path} -> 401, re-authenticating`);
         await this.initSession();
         if (this.sessionToken) headers['Session-Token'] = this.sessionToken;
         continue;
       }
 
+      // 429 -> honour Retry-After header if present, else exponential backoff.
+      if (response.status === 429 && attempt < maxRetries) {
+        const retryAfter = Number(response.headers.get('retry-after'));
+        const delay = retryAfter > 0 ? retryAfter * 1000 : baseDelay * Math.pow(2, attempt);
+        debugLog(`${method} ${path} -> 429 rate-limited, retry in ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
+        attempt++;
+        continue;
+      }
+
       // 5xx -> exponential backoff retry.
       if (response.status >= 500 && attempt < maxRetries) {
-        const delay = (this.config.retryBaseDelayMs ?? 300) * Math.pow(2, attempt);
+        const delay = baseDelay * Math.pow(2, attempt);
+        debugLog(`${method} ${path} -> ${response.status}, retry in ${delay}ms`);
         await new Promise((r) => setTimeout(r, delay));
         attempt++;
         continue;
