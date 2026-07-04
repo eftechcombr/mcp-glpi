@@ -1,6 +1,6 @@
 {
   "name": "mcp-glpi",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "MCP Server for GLPI - IT Service Management for Claude. Multi-criteria search, pagination, dynamic field resolution, ticket timeline, ITIL coverage (incidents, problems, changes, validations), asset CMDB, reporting.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +13,8 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "prepublishOnly": "npm run build",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "keywords": [
     "mcp",

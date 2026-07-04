@@ -81,7 +81,8 @@ export class GlpiSearch {
 
     const start = options.start ?? 0;
     const limit = options.limit ?? DEFAULT_PAGE;
-    return this.fetchPage<T>(itemtype, options, start, limit);
+    // GLPI ranges are inclusive: "0-4" returns 5 rows.
+    return this.fetchPage<T>(itemtype, options, start, start + Math.max(1, limit) - 1);
   }
 
   /**

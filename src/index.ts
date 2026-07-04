@@ -261,6 +261,42 @@ const LIST_TOOL_COMMON_PROPS = {
   expand_dropdowns: { type: 'boolean', description: 'Resolve FK ids to labels (default true)' },
 };
 
+// ---------------------------------------------------------------------------
+// Tool safety annotations (MCP ToolAnnotations)
+//
+// Derived from the tool name so every current and future tool gets hints:
+//   - list/get/search/count/stats  -> readOnlyHint
+//   - delete                       -> destructiveHint (data loss possible)
+//   - update/set/assign            -> destructiveHint (overwrites existing data)
+//   - create/add/link/attach       -> additive write (non-destructive, non-idempotent)
+// openWorldHint is false everywhere: tools only reach the configured GLPI.
+// ---------------------------------------------------------------------------
+
+interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+function toolAnnotations(name: string): ToolAnnotations {
+  if (/^glpi_(list_|get_|search|count$|tickets_stats)/.test(name)) {
+    return { readOnlyHint: true, openWorldHint: false };
+  }
+  if (/^glpi_delete_/.test(name)) {
+    return { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+  }
+  if (/^glpi_(update_|set_|assign_)/.test(name)) {
+    return { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+  }
+  // create / add / link / attach: additive writes. Re-running duplicates data.
+  return { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+}
+
+function annotate<T extends { name: string }>(tool: T): T & { annotations: ToolAnnotations } {
+  return { ...tool, annotations: toolAnnotations(tool.name) };
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     // ============== READ — TICKETS ==============
@@ -1029,7 +1065,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['itemtype', 'field', 'searchtype', 'value'],
       },
     },
-  ],
+  ].map(annotate),
 }));
 
 // ---------------------------------------------------------------------------
