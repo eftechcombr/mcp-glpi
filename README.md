@@ -33,6 +33,9 @@ README documents what's exposed today.
 | `GLPI_USER_TOKEN` | no\* | User API token |
 | `GLPI_USERNAME` | no\* | Login (when not using user token) |
 | `GLPI_PASSWORD` | no\* | Password (when not using user token) |
+| `GLPI_TIMEOUT_MS` | no | HTTP request timeout in ms (default `15000`) |
+| `GLPI_MAX_RETRIES` | no | Max retries on 5xx / 429 / network errors (default `2`) |
+| `GLPI_DEBUG` | no | Set to any value to log HTTP retries/re-auth to stderr |
 
 \* either `GLPI_USER_TOKEN` or `GLPI_USERNAME`+`GLPI_PASSWORD` is required.
 
