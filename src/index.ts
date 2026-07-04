@@ -1,8 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * MCP Server for GLPI v2.0
- * Full-featured IT Service Management integration with Claude
+ * MCP Server for GLPI v3.0
+ *
+ * Major changes vs v2:
+ *   - Unified HTTP layer with auto-reauth, structured errors, retries.
+ *   - List tools accept start/limit/fetch_all/forcedisplay/criteria/sort/order
+ *     (backward-compatible: `limit` alone still works).
+ *   - New `glpi_count` and `glpi_search_v2` (multi-criteria, forcedisplay).
+ *   - High-level `glpi_search_tickets` with friendly params (status/assigned/...).
+ *   - `glpi_get_ticket_timeline` merges followups+tasks+solutions+validations.
+ *   - `glpi_tickets_stats_by` ventilation by status/category/technician/entity/month.
+ *   - Link, validation, document, SLA, satisfaction tools.
+ *   - Field-id mapping via /listSearchOptions for resilience across GLPI versions.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -15,9 +25,13 @@ import {
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { GlpiClient, GlpiConfig } from './glpi-client.js';
+import { GlpiClient, GlpiConfig, ListOptions } from './glpi-client.js';
+import { SearchCriterion, SearchType, SearchLink } from './search.js';
 
-// Status mappings
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 const TICKET_STATUS: Record<number, string> = {
   1: 'New',
   2: 'Processing (assigned)',
@@ -36,36 +50,47 @@ const TICKET_URGENCY: Record<number, string> = {
 };
 
 const PROBLEM_STATUS: Record<number, string> = {
-  1: 'New',
-  2: 'Accepted',
-  3: 'Planned',
-  4: 'Pending',
-  5: 'Solved',
-  6: 'Closed',
+  1: 'New', 2: 'Accepted', 3: 'Planned', 4: 'Pending', 5: 'Solved', 6: 'Closed',
 };
 
 const CHANGE_STATUS: Record<number, string> = {
-  1: 'New',
-  2: 'Evaluation',
-  3: 'Approval',
-  4: 'Accepted',
-  5: 'Pending',
-  6: 'Test',
-  7: 'Qualification',
-  8: 'Applied',
-  9: 'Review',
-  10: 'Closed',
-  11: 'Refused',
-  12: 'Canceled',
+  1: 'New', 2: 'Evaluation', 3: 'Approval', 4: 'Accepted', 5: 'Pending',
+  6: 'Test', 7: 'Qualification', 8: 'Applied', 9: 'Review', 10: 'Closed',
+  11: 'Refused', 12: 'Canceled',
 };
 
-// Get configuration from environment variables
+const VALIDATION_STATUS: Record<number, string> = {
+  1: 'Waiting', 2: 'Granted', 3: 'Refused',
+};
+
+// Standard Ticket search-option field ids (GLPI ≥ 9.5). Fallbacks; the
+// SearchOptions cache is used to resolve friendly names dynamically.
+const TICKET_FIELDS = {
+  id: 2,
+  name: 1,
+  status: 12,
+  date: 15,
+  date_mod: 19,
+  solvedate: 17,
+  closedate: 16,
+  priority: 3,
+  urgency: 10,
+  impact: 11,
+  category: 7,
+  entity: 80,
+  requester_user: 4,
+  technician_user: 5,
+  technician_group: 8,
+  type: 14,
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function getConfig(): GlpiConfig {
   const url = process.env.GLPI_URL;
-  if (!url) {
-    throw new Error('GLPI_URL environment variable is required');
-  }
-
+  if (!url) throw new Error('GLPI_URL environment variable is required');
   return {
     url,
     appToken: process.env.GLPI_APP_TOKEN,
@@ -75,1913 +100,1556 @@ function getConfig(): GlpiConfig {
   };
 }
 
-// Initialize the MCP server
-const server = new Server(
-  {
-    name: 'mcp-glpi',
-    version: '2.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-      resources: {},
-    },
+/**
+ * Parse common list-tool arguments into a ListOptions.
+ *
+ * Accepts (in order of precedence):
+ *   - `range`: "START-END" string passed through as-is
+ *   - `start` + `limit`: assembled into range
+ *   - `limit` alone: range = "0-{limit-1}" (backward-compat with v2)
+ */
+function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
+  const opts: ListOptions = {};
+  if (!args) return { range: '0-49', expand_dropdowns: true };
+
+  if (typeof args.range === 'string') {
+    opts.range = args.range;
+  } else if (args.start !== undefined || args.limit !== undefined) {
+    const start = (args.start as number) ?? 0;
+    const limit = (args.limit as number) ?? 50;
+    opts.range = `${start}-${start + limit - 1}`;
+  } else {
+    opts.range = '0-49';
   }
+
+  if (args.sort !== undefined) opts.sort = args.sort as number;
+  if (args.order) opts.order = args.order as 'ASC' | 'DESC';
+  if (args.is_deleted !== undefined) opts.is_deleted = args.is_deleted as boolean;
+  if (args.include_deleted !== undefined) opts.is_deleted = args.include_deleted as boolean;
+  // Default expand_dropdowns to true for human-readable output.
+  opts.expand_dropdowns =
+    args.expand_dropdowns === false ? false : true;
+  return opts;
+}
+
+interface CriteriaArg {
+  field: number | string;
+  searchtype: SearchType;
+  value: string | number | boolean;
+  link?: SearchLink;
+}
+
+async function resolveCriteria(
+  client: GlpiClient,
+  itemtype: string,
+  raw: CriteriaArg[]
+): Promise<SearchCriterion[]> {
+  return Promise.all(
+    raw.map(async (c) => ({
+      field: (await client.searchOptions.resolveField(itemtype, c.field)) ??
+        (typeof c.field === 'number' ? c.field : 0),
+      searchtype: c.searchtype,
+      value: c.value,
+      link: c.link,
+    }))
+  );
+}
+
+function text(obj: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(obj, null, 2) }] };
+}
+
+function formatTicketSummary(t: any) {
+  return {
+    id: t.id,
+    name: t.name,
+    status: TICKET_STATUS[t.status] ?? t.status,
+    urgency: TICKET_URGENCY[t.urgency] ?? t.urgency,
+    priority: TICKET_URGENCY[t.priority] ?? t.priority,
+    date: t.date,
+    date_mod: t.date_mod,
+    entities_id: t.entities_id,
+    itilcategories_id: t.itilcategories_id,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Server setup
+// ---------------------------------------------------------------------------
+
+const server = new Server(
+  { name: 'mcp-glpi', version: '3.0.0' },
+  { capabilities: { tools: {}, resources: {} } }
 );
 
-let glpiClient: GlpiClient;
+let client: GlpiClient;
 
-// Define available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      // ==================== TICKET TOOLS ====================
-      {
-        name: 'glpi_list_tickets',
-        description: 'List tickets from GLPI with optional filters',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of tickets to return (default: 50)' },
-            status: { type: 'number', description: 'Filter by status (1=New, 2=Processing assigned, 3=Processing planned, 4=Pending, 5=Solved, 6=Closed)' },
-            order: { type: 'string', enum: ['ASC', 'DESC'], description: 'Sort order (default: DESC)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_ticket',
-        description: 'Get detailed information about a specific ticket including followups and tasks',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The ticket ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_create_ticket',
-        description: 'Create a new ticket in GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Ticket title/subject' },
-            content: { type: 'string', description: 'Ticket description/content' },
-            urgency: { type: 'number', description: 'Urgency level (1-5, default: 3)' },
-            category_id: { type: 'number', description: 'Category ID for the ticket' },
-            user_id_assign: { type: 'number', description: 'User ID to assign the ticket to' },
-            group_id_assign: { type: 'number', description: 'Group ID to assign the ticket to' },
-            type: { type: 'number', description: 'Ticket type (1=Incident, 2=Request)' },
-          },
-          required: ['name', 'content'],
-        },
-      },
-      {
-        name: 'glpi_update_ticket',
-        description: 'Update an existing ticket',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The ticket ID to update' },
-            name: { type: 'string', description: 'New ticket title' },
-            content: { type: 'string', description: 'New ticket content' },
-            status: { type: 'number', description: 'New status (1-6)' },
-            urgency: { type: 'number', description: 'New urgency (1-5)' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_delete_ticket',
-        description: 'Delete a ticket (move to trash or permanently delete)',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The ticket ID to delete' },
-            force: { type: 'boolean', description: 'Permanently delete (true) or move to trash (false, default)' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_add_followup',
-        description: 'Add a followup/comment to a ticket',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticket_id: { type: 'number', description: 'The ticket ID' },
-            content: { type: 'string', description: 'Followup content' },
-            is_private: { type: 'boolean', description: 'Whether the followup is private (default: false)' },
-          },
-          required: ['ticket_id', 'content'],
-        },
-      },
-      {
-        name: 'glpi_add_task',
-        description: 'Add a task to a ticket',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticket_id: { type: 'number', description: 'The ticket ID' },
-            content: { type: 'string', description: 'Task description' },
-            actiontime: { type: 'number', description: 'Time spent in seconds' },
-            is_private: { type: 'boolean', description: 'Whether the task is private' },
-            state: { type: 'number', description: 'Task state (0=Information, 1=To do, 2=Done)' },
-            users_id_tech: { type: 'number', description: 'Technician user ID' },
-          },
-          required: ['ticket_id', 'content'],
-        },
-      },
-      {
-        name: 'glpi_add_solution',
-        description: 'Add a solution to close a ticket',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticket_id: { type: 'number', description: 'The ticket ID' },
-            content: { type: 'string', description: 'Solution description' },
-            solutiontypes_id: { type: 'number', description: 'Solution type ID' },
-          },
-          required: ['ticket_id', 'content'],
-        },
-      },
-      {
-        name: 'glpi_assign_ticket',
-        description: 'Assign a ticket to a user or group',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticket_id: { type: 'number', description: 'The ticket ID' },
-            user_id: { type: 'number', description: 'User ID to assign' },
-            type: { type: 'number', description: 'Actor type (1=Requester, 2=Assigned, 3=Observer)' },
-          },
-          required: ['ticket_id', 'user_id'],
-        },
-      },
-      {
-        name: 'glpi_get_ticket_tasks',
-        description: 'Get all tasks for a ticket',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticket_id: { type: 'number', description: 'The ticket ID' },
-          },
-          required: ['ticket_id'],
-        },
-      },
-      {
-        name: 'glpi_get_ticket_followups',
-        description: 'Get all followups/comments for a ticket',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            ticket_id: { type: 'number', description: 'The ticket ID' },
-          },
-          required: ['ticket_id'],
-        },
-      },
+// ---------------------------------------------------------------------------
+// Tool registration
+// ---------------------------------------------------------------------------
 
-      // ==================== PROBLEM TOOLS ====================
-      {
-        name: 'glpi_list_problems',
-        description: 'List problems from GLPI (ITIL Problem Management)',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of problems to return (default: 50)' },
-            order: { type: 'string', enum: ['ASC', 'DESC'], description: 'Sort order' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_problem',
-        description: 'Get detailed information about a specific problem',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The problem ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_create_problem',
-        description: 'Create a new problem in GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Problem title' },
-            content: { type: 'string', description: 'Problem description' },
-            urgency: { type: 'number', description: 'Urgency (1-5)' },
-            impact: { type: 'number', description: 'Impact (1-5)' },
-            priority: { type: 'number', description: 'Priority (1-6)' },
-            category_id: { type: 'number', description: 'Category ID' },
-          },
-          required: ['name', 'content'],
-        },
-      },
-      {
-        name: 'glpi_update_problem',
-        description: 'Update an existing problem',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The problem ID' },
-            name: { type: 'string', description: 'New title' },
-            content: { type: 'string', description: 'New content' },
-            status: { type: 'number', description: 'New status' },
-            urgency: { type: 'number', description: 'New urgency' },
-          },
-          required: ['id'],
-        },
-      },
+const LIST_TOOL_COMMON_PROPS = {
+  start: { type: 'number', description: 'Offset (default 0)' },
+  limit: { type: 'number', description: 'Max rows in this call (default 50)' },
+  range: { type: 'string', description: 'Explicit "START-END" range; overrides start/limit' },
+  sort: { type: 'number', description: 'Sort by field id (search option id)' },
+  order: { type: 'string', enum: ['ASC', 'DESC'] },
+  expand_dropdowns: { type: 'boolean', description: 'Resolve FK ids to labels (default true)' },
+};
 
-      // ==================== CHANGE TOOLS ====================
-      {
-        name: 'glpi_list_changes',
-        description: 'List changes from GLPI (ITIL Change Management)',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of changes to return (default: 50)' },
-            order: { type: 'string', enum: ['ASC', 'DESC'], description: 'Sort order' },
-          },
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    // ============== READ — TICKETS ==============
+    {
+      name: 'glpi_list_tickets',
+      description: 'List tickets. Supports start/limit/range/sort/order/status filter.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...LIST_TOOL_COMMON_PROPS,
+          status: { type: 'number', description: '1=New 2=Assigned 3=Planned 4=Pending 5=Solved 6=Closed' },
         },
       },
-      {
-        name: 'glpi_get_change',
-        description: 'Get detailed information about a specific change',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The change ID' },
-          },
-          required: ['id'],
+    },
+    {
+      name: 'glpi_get_ticket',
+      description: 'Get a ticket with status/urgency labels and counts of linked items.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          with_logs: { type: 'boolean' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'glpi_get_ticket_timeline',
+      description: 'Full chronological timeline of a ticket: followups + tasks + solutions + validations, sorted by date.',
+      inputSchema: {
+        type: 'object',
+        properties: { id: { type: 'number' } },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'glpi_search_tickets',
+      description: 'High-level ticket search with friendly params. Use this instead of glpi_search_v2 for tickets.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          status: { type: 'number', description: '1..6 (see status reference)' },
+          assigned_user_id: { type: 'number' },
+          assigned_group_id: { type: 'number' },
+          requester_user_id: { type: 'number' },
+          category_id: { type: 'number' },
+          entity_id: { type: 'number' },
+          priority: { type: 'number', description: '1=Very low .. 5=Very high' },
+          urgency: { type: 'number', description: '1..5' },
+          date_from: { type: 'string', description: 'YYYY-MM-DD HH:MM:SS' },
+          date_to: { type: 'string', description: 'YYYY-MM-DD HH:MM:SS' },
+          text_search: { type: 'string', description: 'Free text in title' },
+          open_only: { type: 'boolean', description: 'Status < 5 only' },
+          start: { type: 'number' },
+          limit: { type: 'number' },
+          fetch_all: { type: 'boolean', description: 'Paginate until totalcount; capped by max_rows (default 1000).' },
+          max_rows: { type: 'number' },
+          order: { type: 'string', enum: ['ASC', 'DESC'] },
+          sort: { type: 'number' },
         },
       },
-      {
-        name: 'glpi_create_change',
-        description: 'Create a new change request in GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Change title' },
-            content: { type: 'string', description: 'Change description' },
-            urgency: { type: 'number', description: 'Urgency (1-5)' },
-            impact: { type: 'number', description: 'Impact (1-5)' },
-            priority: { type: 'number', description: 'Priority (1-6)' },
-            category_id: { type: 'number', description: 'Category ID' },
-          },
-          required: ['name', 'content'],
-        },
-      },
-      {
-        name: 'glpi_update_change',
-        description: 'Update an existing change',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The change ID' },
-            name: { type: 'string', description: 'New title' },
-            content: { type: 'string', description: 'New content' },
-            status: { type: 'number', description: 'New status' },
-          },
-          required: ['id'],
-        },
-      },
+    },
+    {
+      name: 'glpi_get_ticket_followups',
+      description: 'List followups of a ticket.',
+      inputSchema: { type: 'object', properties: { ticket_id: { type: 'number' } }, required: ['ticket_id'] },
+    },
+    {
+      name: 'glpi_get_ticket_tasks',
+      description: 'List tasks of a ticket.',
+      inputSchema: { type: 'object', properties: { ticket_id: { type: 'number' } }, required: ['ticket_id'] },
+    },
+    {
+      name: 'glpi_get_ticket_solutions',
+      description: 'List solutions of a ticket.',
+      inputSchema: { type: 'object', properties: { ticket_id: { type: 'number' } }, required: ['ticket_id'] },
+    },
+    {
+      name: 'glpi_get_ticket_validations',
+      description: 'List validations (approvals) of a ticket.',
+      inputSchema: { type: 'object', properties: { ticket_id: { type: 'number' } }, required: ['ticket_id'] },
+    },
+    {
+      name: 'glpi_get_ticket_documents',
+      description: 'List documents (attachments) of a ticket.',
+      inputSchema: { type: 'object', properties: { ticket_id: { type: 'number' } }, required: ['ticket_id'] },
+    },
 
-      // ==================== COMPUTER/ASSET TOOLS ====================
-      {
-        name: 'glpi_list_computers',
-        description: 'List computers/workstations from GLPI inventory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of computers to return (default: 50)' },
-            include_deleted: { type: 'boolean', description: 'Include deleted computers (default: false)' },
-          },
+    // ============== WRITE — TICKETS ==============
+    {
+      name: 'glpi_create_ticket',
+      description: 'Create a new ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          content: { type: 'string' },
+          urgency: { type: 'number' },
+          impact: { type: 'number' },
+          priority: { type: 'number' },
+          type: { type: 'number', description: '1=Incident, 2=Request' },
+          category_id: { type: 'number' },
+          entity_id: { type: 'number' },
+          user_id_assign: { type: 'number' },
+          group_id_assign: { type: 'number' },
+          requester_user_id: { type: 'number' },
+          requester_group_id: { type: 'number' },
+          time_to_resolve: { type: 'string' },
+        },
+        required: ['name', 'content'],
+      },
+    },
+    {
+      name: 'glpi_update_ticket',
+      description: 'Update fields of a ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          name: { type: 'string' },
+          content: { type: 'string' },
+          status: { type: 'number' },
+          urgency: { type: 'number' },
+          priority: { type: 'number' },
+          impact: { type: 'number' },
+          itilcategories_id: { type: 'number' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'glpi_delete_ticket',
+      description: '⚠️ DESTRUCTIVE: delete a ticket. force=true purges (irrecoverable).',
+      inputSchema: {
+        type: 'object',
+        properties: { id: { type: 'number' }, force: { type: 'boolean' } },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'glpi_add_followup',
+      description: 'Add a followup comment to a ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ticket_id: { type: 'number' },
+          content: { type: 'string' },
+          is_private: { type: 'boolean' },
+        },
+        required: ['ticket_id', 'content'],
+      },
+    },
+    {
+      name: 'glpi_add_task',
+      description: 'Add a task (with time tracking) to a ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ticket_id: { type: 'number' },
+          content: { type: 'string' },
+          actiontime: { type: 'number' },
+          is_private: { type: 'boolean' },
+          state: { type: 'number', description: '0=Info 1=Todo 2=Done' },
+          users_id_tech: { type: 'number' },
+          groups_id_tech: { type: 'number' },
+        },
+        required: ['ticket_id', 'content'],
+      },
+    },
+    {
+      name: 'glpi_add_solution',
+      description: 'Add a solution to a ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ticket_id: { type: 'number' },
+          content: { type: 'string' },
+          solutiontypes_id: { type: 'number' },
+        },
+        required: ['ticket_id', 'content'],
+      },
+    },
+    {
+      name: 'glpi_assign_ticket',
+      description: 'Assign a ticket to a user OR a group. type: 1=requester, 2=assigned, 3=observer.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ticket_id: { type: 'number' },
+          user_id: { type: 'number' },
+          group_id: { type: 'number' },
+          type: { type: 'number' },
+        },
+        required: ['ticket_id'],
+      },
+    },
+    {
+      name: 'glpi_link_tickets',
+      description: 'Link two tickets. link_type: 1=link 2=duplicate 3=parent.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          parent_id: { type: 'number' },
+          child_id: { type: 'number' },
+          link_type: { type: 'number' },
+        },
+        required: ['parent_id', 'child_id'],
+      },
+    },
+    {
+      name: 'glpi_add_ticket_validation',
+      description: 'Request a validation (approval) on a ticket. The chosen user receives the approval request.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ticket_id: { type: 'number' },
+          users_id_validate: { type: 'number', description: 'User asked to validate' },
+          comment_submission: { type: 'string' },
+        },
+        required: ['ticket_id', 'users_id_validate'],
+      },
+    },
+    {
+      name: 'glpi_set_validation_status',
+      description: 'Approve (2) or refuse (3) an existing TicketValidation. Provide optional comment.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          validation_id: { type: 'number' },
+          status: { type: 'number', enum: [2, 3], description: '2=granted, 3=refused' },
+          comment_validation: { type: 'string' },
+        },
+        required: ['validation_id', 'status'],
+      },
+    },
+    {
+      name: 'glpi_attach_document_to_ticket',
+      description: 'Link an existing document (uploaded separately) to a ticket via Document_Item.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ticket_id: { type: 'number' },
+          document_id: { type: 'number' },
+        },
+        required: ['ticket_id', 'document_id'],
+      },
+    },
+    {
+      name: 'glpi_get_ticket_satisfaction',
+      description: 'Get satisfaction survey data (score, comment) for a ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: { ticket_id: { type: 'number' } },
+        required: ['ticket_id'],
+      },
+    },
+    {
+      name: 'glpi_list_overdue_tickets',
+      description: 'List tickets whose SLA resolution deadline (time_to_resolve) is in the past and status < 5.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          entity_id: { type: 'number' },
+          limit: { type: 'number' },
         },
       },
-      {
-        name: 'glpi_get_computer',
-        description: 'Get detailed information about a specific computer including software and connections',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The computer ID' },
-            with_softwares: { type: 'boolean', description: 'Include installed software' },
-            with_connections: { type: 'boolean', description: 'Include connected items' },
-            with_networkports: { type: 'boolean', description: 'Include network ports' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_create_computer',
-        description: 'Create a new computer in GLPI inventory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Computer name' },
-            serial: { type: 'string', description: 'Serial number' },
-            otherserial: { type: 'string', description: 'Inventory number' },
-            contact: { type: 'string', description: 'Contact person' },
-            comment: { type: 'string', description: 'Comments' },
-            locations_id: { type: 'number', description: 'Location ID' },
-            states_id: { type: 'number', description: 'State ID' },
-            computertypes_id: { type: 'number', description: 'Computer type ID' },
-            manufacturers_id: { type: 'number', description: 'Manufacturer ID' },
-          },
-          required: ['name'],
-        },
-      },
-      {
-        name: 'glpi_update_computer',
-        description: 'Update an existing computer',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The computer ID' },
-            name: { type: 'string', description: 'New name' },
-            serial: { type: 'string', description: 'New serial number' },
-            comment: { type: 'string', description: 'New comment' },
-            locations_id: { type: 'number', description: 'New location ID' },
-            states_id: { type: 'number', description: 'New state ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_delete_computer',
-        description: 'Delete a computer from inventory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The computer ID' },
-            force: { type: 'boolean', description: 'Permanently delete (default: false, moves to trash)' },
-          },
-          required: ['id'],
-        },
-      },
+    },
 
-      // ==================== SOFTWARE TOOLS ====================
-      {
-        name: 'glpi_list_softwares',
-        description: 'List software from GLPI inventory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of software to return (default: 50)' },
-          },
+    // ============== PROBLEMS / CHANGES ==============
+    {
+      name: 'glpi_list_problems',
+      description: 'List problems.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_problem',
+      description: 'Get a problem with status label.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_problem',
+      description: 'Create a problem.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, content: { type: 'string' },
+          urgency: { type: 'number' }, impact: { type: 'number' }, priority: { type: 'number' },
+          category_id: { type: 'number' },
         },
+        required: ['name', 'content'],
       },
-      {
-        name: 'glpi_get_software',
-        description: 'Get detailed information about a specific software',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The software ID' },
-          },
-          required: ['id'],
+    },
+    {
+      name: 'glpi_update_problem',
+      description: 'Update a problem.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' }, name: { type: 'string' }, content: { type: 'string' },
+          status: { type: 'number' }, urgency: { type: 'number' },
         },
+        required: ['id'],
       },
-      {
-        name: 'glpi_create_software',
-        description: 'Create a new software entry',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Software name' },
-            comment: { type: 'string', description: 'Comments' },
-            manufacturers_id: { type: 'number', description: 'Manufacturer ID' },
-            softwarecategories_id: { type: 'number', description: 'Software category ID' },
-          },
-          required: ['name'],
+    },
+    {
+      name: 'glpi_list_changes',
+      description: 'List changes.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_change',
+      description: 'Get a change with status label.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_change',
+      description: 'Create a change.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, content: { type: 'string' },
+          urgency: { type: 'number' }, impact: { type: 'number' }, priority: { type: 'number' },
+          category_id: { type: 'number' },
         },
+        required: ['name', 'content'],
       },
+    },
+    {
+      name: 'glpi_update_change',
+      description: 'Update a change.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' }, name: { type: 'string' }, content: { type: 'string' },
+          status: { type: 'number' },
+        },
+        required: ['id'],
+      },
+    },
 
-      // ==================== NETWORK EQUIPMENT TOOLS ====================
-      {
-        name: 'glpi_list_network_equipments',
-        description: 'List network equipment (switches, routers, etc.)',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
+    // ============== ASSETS ==============
+    ...[
+      'computers', 'softwares', 'network_equipments', 'printers', 'monitors', 'phones',
+    ].flatMap((asset) => {
+      const singular = asset.replace(/s$/, '');
+      return [
+        {
+          name: `glpi_list_${asset}`,
+          description: `List ${asset.replace('_', ' ')}.`,
+          inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+        },
+        {
+          name: `glpi_get_${singular}`,
+          description: `Get a ${singular.replace('_', ' ')} by id.`,
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id: { type: 'number' },
+              with_softwares: { type: 'boolean' },
+              with_networkports: { type: 'boolean' },
+              with_connections: { type: 'boolean' },
+              with_documents: { type: 'boolean' },
+            },
+            required: ['id'],
           },
         },
-      },
-      {
-        name: 'glpi_get_network_equipment',
-        description: 'Get detailed information about a network equipment',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The equipment ID' },
-            with_networkports: { type: 'boolean', description: 'Include network ports' },
-          },
-          required: ['id'],
+      ];
+    }),
+    {
+      name: 'glpi_create_computer',
+      description: 'Add a computer to inventory.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          serial: { type: 'string' }, otherserial: { type: 'string' },
+          contact: { type: 'string' }, comment: { type: 'string' },
+          locations_id: { type: 'number' }, states_id: { type: 'number' },
+          computertypes_id: { type: 'number' }, manufacturers_id: { type: 'number' },
         },
+        required: ['name'],
       },
+    },
+    {
+      name: 'glpi_update_computer',
+      description: 'Update a computer.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' }, name: { type: 'string' }, serial: { type: 'string' },
+          comment: { type: 'string' }, locations_id: { type: 'number' }, states_id: { type: 'number' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'glpi_delete_computer',
+      description: '⚠️ DESTRUCTIVE: delete a computer. force=true purges.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' }, force: { type: 'boolean' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_software',
+      description: 'Add software.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, comment: { type: 'string' },
+          manufacturers_id: { type: 'number' }, softwarecategories_id: { type: 'number' },
+        },
+        required: ['name'],
+      },
+    },
 
-      // ==================== PRINTER TOOLS ====================
-      {
-        name: 'glpi_list_printers',
-        description: 'List printers from GLPI inventory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
-        },
+    // ============== KB / CONTRACTS / SUPPLIERS / LOCATIONS / PROJECTS ==============
+    {
+      name: 'glpi_list_knowbase',
+      description: 'List KB articles.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_knowbase_item',
+      description: 'Get a KB article.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_search_knowbase',
+      description: 'Search KB articles by free text in title (field id resolved dynamically).',
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string' }, limit: { type: 'number' } },
+        required: ['query'],
       },
-      {
-        name: 'glpi_get_printer',
-        description: 'Get detailed information about a printer',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The printer ID' },
-          },
-          required: ['id'],
+    },
+    {
+      name: 'glpi_create_knowbase_item',
+      description: 'Create a KB article.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, answer: { type: 'string' },
+          is_faq: { type: 'boolean' }, knowbaseitemcategories_id: { type: 'number' },
         },
+        required: ['name', 'answer'],
       },
+    },
+    {
+      name: 'glpi_list_contracts',
+      description: 'List contracts.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_contract',
+      description: 'Get a contract.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_contract',
+      description: 'Create a contract.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, num: { type: 'string' },
+          begin_date: { type: 'string' }, duration: { type: 'number' },
+          notice: { type: 'number' }, comment: { type: 'string' },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'glpi_list_suppliers',
+      description: 'List suppliers.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_supplier',
+      description: 'Get a supplier.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_supplier',
+      description: 'Create a supplier.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, address: { type: 'string' }, postcode: { type: 'string' },
+          town: { type: 'string' }, country: { type: 'string' }, website: { type: 'string' },
+          phonenumber: { type: 'string' }, email: { type: 'string' },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'glpi_list_locations',
+      description: 'List locations.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_location',
+      description: 'Get a location.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_location',
+      description: 'Create a location.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, address: { type: 'string' }, postcode: { type: 'string' },
+          town: { type: 'string' }, building: { type: 'string' }, room: { type: 'string' },
+          locations_id: { type: 'number' },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'glpi_list_projects',
+      description: 'List projects.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_project',
+      description: 'Get a project.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_project',
+      description: 'Create a project.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, code: { type: 'string' }, content: { type: 'string' },
+          priority: { type: 'number' }, plan_start_date: { type: 'string' },
+          plan_end_date: { type: 'string' }, users_id: { type: 'number' }, groups_id: { type: 'number' },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'glpi_update_project',
+      description: 'Update a project (progress, dates, content).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' }, name: { type: 'string' }, content: { type: 'string' },
+          percent_done: { type: 'number' },
+          real_start_date: { type: 'string' }, real_end_date: { type: 'string' },
+        },
+        required: ['id'],
+      },
+    },
 
-      // ==================== MONITOR TOOLS ====================
-      {
-        name: 'glpi_list_monitors',
-        description: 'List monitors from GLPI inventory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
-        },
+    // ============== USERS / GROUPS / CATEGORIES / ENTITIES / DOCUMENTS ==============
+    {
+      name: 'glpi_list_users',
+      description: 'List users. active_only defaults to true (uses search criteria, not searchText).',
+      inputSchema: {
+        type: 'object',
+        properties: { ...LIST_TOOL_COMMON_PROPS, active_only: { type: 'boolean' } },
       },
-      {
-        name: 'glpi_get_monitor',
-        description: 'Get detailed information about a monitor',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The monitor ID' },
-          },
-          required: ['id'],
+    },
+    {
+      name: 'glpi_get_user',
+      description: 'Get a user.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_search_user',
+      description: 'Search a user by login name (exact "contains" on name field).',
+      inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+    },
+    {
+      name: 'glpi_create_user',
+      description: 'Create a user.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, password: { type: 'string' },
+          realname: { type: 'string' }, firstname: { type: 'string' },
+          email: { type: 'string' }, phone: { type: 'string' }, profiles_id: { type: 'number' },
         },
+        required: ['name'],
       },
+    },
+    {
+      name: 'glpi_list_groups',
+      description: 'List groups.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_group',
+      description: 'Get a group.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_create_group',
+      description: 'Create a group.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, comment: { type: 'string' },
+          is_requester: { type: 'boolean' }, is_assign: { type: 'boolean' },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'glpi_add_user_to_group',
+      description: 'Add a user to a group.',
+      inputSchema: {
+        type: 'object',
+        properties: { user_id: { type: 'number' }, group_id: { type: 'number' }, is_manager: { type: 'boolean' } },
+        required: ['user_id', 'group_id'],
+      },
+    },
+    {
+      name: 'glpi_list_categories',
+      description: 'List ticket categories.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_list_entities',
+      description: 'List entities.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_entity',
+      description: 'Get an entity.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
+    {
+      name: 'glpi_list_documents',
+      description: 'List documents.',
+      inputSchema: { type: 'object', properties: LIST_TOOL_COMMON_PROPS },
+    },
+    {
+      name: 'glpi_get_document',
+      description: 'Get a document.',
+      inputSchema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+    },
 
-      // ==================== PHONE TOOLS ====================
-      {
-        name: 'glpi_list_phones',
-        description: 'List phones from GLPI inventory',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
+    // ============== STATS ==============
+    {
+      name: 'glpi_get_ticket_stats',
+      description: 'Ticket counts by status. Optional filters: entity, date_from, date_to.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          entity_id: { type: 'number' },
+          date_from: { type: 'string', description: 'YYYY-MM-DD' },
+          date_to: { type: 'string', description: 'YYYY-MM-DD' },
         },
       },
-      {
-        name: 'glpi_get_phone',
-        description: 'Get detailed information about a phone',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The phone ID' },
+    },
+    {
+      name: 'glpi_get_asset_stats',
+      description: 'Total counts per asset type (Computer/Monitor/Printer/NetworkEquipment/Phone/Software).',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'glpi_tickets_stats_by',
+      description: 'Ticket count broken down by a dimension (status / category / technician / entity / month). Optional period filter.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dimension: {
+            type: 'string',
+            enum: ['status', 'category', 'technician', 'entity', 'month'],
           },
-          required: ['id'],
+          date_from: { type: 'string' },
+          date_to: { type: 'string' },
+          entity_id: { type: 'number' },
         },
+        required: ['dimension'],
       },
+    },
 
-      // ==================== KNOWLEDGE BASE TOOLS ====================
-      {
-        name: 'glpi_list_knowbase',
-        description: 'List knowledge base articles',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_knowbase_item',
-        description: 'Get a specific knowledge base article',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The article ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_search_knowbase',
-        description: 'Search knowledge base articles',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Search query' },
-          },
-          required: ['query'],
-        },
-      },
-      {
-        name: 'glpi_create_knowbase_item',
-        description: 'Create a new knowledge base article',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Article title' },
-            answer: { type: 'string', description: 'Article content (HTML supported)' },
-            is_faq: { type: 'boolean', description: 'Add to FAQ (default: false)' },
-            knowbaseitemcategories_id: { type: 'number', description: 'Category ID' },
-          },
-          required: ['name', 'answer'],
-        },
-      },
+    // ============== SESSION ==============
+    {
+      name: 'glpi_get_session_info',
+      description: 'Active profile + available profiles + entities.',
+      inputSchema: { type: 'object', properties: {} },
+    },
 
-      // ==================== CONTRACT TOOLS ====================
-      {
-        name: 'glpi_list_contracts',
-        description: 'List contracts from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
+    // ============== GENERIC SEARCH / COUNT ==============
+    {
+      name: 'glpi_search_v2',
+      description: 'Multi-criteria search. Use criteria[]: {field, searchtype, value, link}. Supports forcedisplay, sort, order, start/limit, fetch_all.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          itemtype: { type: 'string' },
+          criteria: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                field: { description: 'field_id (number) OR friendly name resolved via listSearchOptions' },
+                searchtype: {
+                  type: 'string',
+                  enum: ['contains', 'notcontains', 'equals', 'notequals', 'lessthan', 'morethan', 'under', 'notunder', 'empty', 'notempty'],
+                },
+                value: {},
+                link: { type: 'string', enum: ['AND', 'OR', 'AND NOT', 'OR NOT'] },
+              },
+              required: ['field', 'searchtype', 'value'],
+            },
+          },
+          forcedisplay: { type: 'array', items: { type: 'number' } },
+          start: { type: 'number' },
+          limit: { type: 'number' },
+          sort: { type: 'number' },
+          order: { type: 'string', enum: ['ASC', 'DESC'] },
+          fetch_all: { type: 'boolean' },
+          max_rows: { type: 'number' },
+          expand_dropdowns: { type: 'boolean' },
+        },
+        required: ['itemtype'],
+      },
+    },
+    {
+      name: 'glpi_count',
+      description: 'Return totalcount for an itemtype + criteria (cheap range=0-0 probe).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          itemtype: { type: 'string' },
+          criteria: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                field: {},
+                searchtype: { type: 'string' },
+                value: {},
+                link: { type: 'string' },
+              },
+              required: ['field', 'searchtype', 'value'],
+            },
           },
         },
+        required: ['itemtype'],
       },
-      {
-        name: 'glpi_get_contract',
-        description: 'Get detailed information about a contract',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The contract ID' },
-          },
-          required: ['id'],
-        },
+    },
+    {
+      name: 'glpi_list_search_options',
+      description: 'Discover the searchable fields of an itemtype (returns field_id → name/uid/datatype). Useful to build criteria for glpi_search_v2.',
+      inputSchema: {
+        type: 'object',
+        properties: { itemtype: { type: 'string' } },
+        required: ['itemtype'],
       },
-      {
-        name: 'glpi_create_contract',
-        description: 'Create a new contract',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Contract name' },
-            num: { type: 'string', description: 'Contract number' },
-            begin_date: { type: 'string', description: 'Start date (YYYY-MM-DD)' },
-            duration: { type: 'number', description: 'Duration in months' },
-            notice: { type: 'number', description: 'Notice period in months' },
-            comment: { type: 'string', description: 'Comments' },
-          },
-          required: ['name'],
-        },
-      },
+    },
 
-      // ==================== SUPPLIER TOOLS ====================
-      {
-        name: 'glpi_list_suppliers',
-        description: 'List suppliers from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
+    // ============== legacy compat: keep glpi_search (mono-criterion) as deprecated alias ==============
+    {
+      name: 'glpi_search',
+      description: '[DEPRECATED — prefer glpi_search_v2] Single-criterion search (kept for backward compat).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          itemtype: { type: 'string' },
+          field: { type: 'number' },
+          searchtype: { type: 'string' },
+          value: { type: 'string' },
         },
+        required: ['itemtype', 'field', 'searchtype', 'value'],
       },
-      {
-        name: 'glpi_get_supplier',
-        description: 'Get detailed information about a supplier',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The supplier ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_create_supplier',
-        description: 'Create a new supplier',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Supplier name' },
-            address: { type: 'string', description: 'Address' },
-            postcode: { type: 'string', description: 'Postal code' },
-            town: { type: 'string', description: 'City' },
-            country: { type: 'string', description: 'Country' },
-            website: { type: 'string', description: 'Website URL' },
-            phonenumber: { type: 'string', description: 'Phone number' },
-            email: { type: 'string', description: 'Email address' },
-          },
-          required: ['name'],
-        },
-      },
+    },
+  ],
+}));
 
-      // ==================== LOCATION TOOLS ====================
-      {
-        name: 'glpi_list_locations',
-        description: 'List locations from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_location',
-        description: 'Get detailed information about a location',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The location ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_create_location',
-        description: 'Create a new location',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Location name' },
-            address: { type: 'string', description: 'Address' },
-            postcode: { type: 'string', description: 'Postal code' },
-            town: { type: 'string', description: 'City' },
-            building: { type: 'string', description: 'Building' },
-            room: { type: 'string', description: 'Room' },
-            locations_id: { type: 'number', description: 'Parent location ID' },
-          },
-          required: ['name'],
-        },
-      },
+// ---------------------------------------------------------------------------
+// Tool dispatch
+// ---------------------------------------------------------------------------
 
-      // ==================== PROJECT TOOLS ====================
-      {
-        name: 'glpi_list_projects',
-        description: 'List projects from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_project',
-        description: 'Get detailed information about a project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The project ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_create_project',
-        description: 'Create a new project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Project name' },
-            code: { type: 'string', description: 'Project code' },
-            content: { type: 'string', description: 'Project description' },
-            priority: { type: 'number', description: 'Priority (1-6)' },
-            plan_start_date: { type: 'string', description: 'Planned start date (YYYY-MM-DD)' },
-            plan_end_date: { type: 'string', description: 'Planned end date (YYYY-MM-DD)' },
-            users_id: { type: 'number', description: 'Manager user ID' },
-            groups_id: { type: 'number', description: 'Manager group ID' },
-          },
-          required: ['name'],
-        },
-      },
-      {
-        name: 'glpi_update_project',
-        description: 'Update an existing project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The project ID' },
-            name: { type: 'string', description: 'New name' },
-            content: { type: 'string', description: 'New description' },
-            percent_done: { type: 'number', description: 'Completion percentage (0-100)' },
-            real_start_date: { type: 'string', description: 'Actual start date' },
-            real_end_date: { type: 'string', description: 'Actual end date' },
-          },
-          required: ['id'],
-        },
-      },
-
-      // ==================== USER TOOLS ====================
-      {
-        name: 'glpi_list_users',
-        description: 'List users from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of users to return (default: 50)' },
-            active_only: { type: 'boolean', description: 'Only return active users (default: true)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_user',
-        description: 'Get detailed information about a specific user',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The user ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_search_user',
-        description: 'Search for a user by name',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Username to search for' },
-          },
-          required: ['name'],
-        },
-      },
-      {
-        name: 'glpi_create_user',
-        description: 'Create a new user',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Username (login)' },
-            password: { type: 'string', description: 'Password' },
-            realname: { type: 'string', description: 'Last name' },
-            firstname: { type: 'string', description: 'First name' },
-            email: { type: 'string', description: 'Email address' },
-            phone: { type: 'string', description: 'Phone number' },
-            profiles_id: { type: 'number', description: 'Profile ID' },
-          },
-          required: ['name'],
-        },
-      },
-
-      // ==================== GROUP TOOLS ====================
-      {
-        name: 'glpi_list_groups',
-        description: 'List groups from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of groups to return (default: 50)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_group',
-        description: 'Get detailed information about a specific group',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The group ID' },
-          },
-          required: ['id'],
-        },
-      },
-      {
-        name: 'glpi_create_group',
-        description: 'Create a new group',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Group name' },
-            comment: { type: 'string', description: 'Comments' },
-            is_requester: { type: 'boolean', description: 'Can be requester' },
-            is_assign: { type: 'boolean', description: 'Can be assigned to tickets' },
-          },
-          required: ['name'],
-        },
-      },
-      {
-        name: 'glpi_add_user_to_group',
-        description: 'Add a user to a group',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            user_id: { type: 'number', description: 'User ID' },
-            group_id: { type: 'number', description: 'Group ID' },
-            is_manager: { type: 'boolean', description: 'Set as group manager' },
-          },
-          required: ['user_id', 'group_id'],
-        },
-      },
-
-      // ==================== CATEGORY TOOLS ====================
-      {
-        name: 'glpi_list_categories',
-        description: 'List ticket categories from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number of categories to return (default: 50)' },
-          },
-        },
-      },
-
-      // ==================== ENTITY TOOLS ====================
-      {
-        name: 'glpi_list_entities',
-        description: 'List entities from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_entity',
-        description: 'Get detailed information about an entity',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The entity ID' },
-          },
-          required: ['id'],
-        },
-      },
-
-      // ==================== DOCUMENT TOOLS ====================
-      {
-        name: 'glpi_list_documents',
-        description: 'List documents from GLPI',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum number to return (default: 50)' },
-          },
-        },
-      },
-      {
-        name: 'glpi_get_document',
-        description: 'Get detailed information about a document',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'The document ID' },
-          },
-          required: ['id'],
-        },
-      },
-
-      // ==================== STATISTICS TOOLS ====================
-      {
-        name: 'glpi_get_ticket_stats',
-        description: 'Get ticket statistics (counts by status)',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-      {
-        name: 'glpi_get_asset_stats',
-        description: 'Get asset inventory statistics',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-
-      // ==================== SESSION TOOLS ====================
-      {
-        name: 'glpi_get_session_info',
-        description: 'Get current session information (profile, entities, permissions)',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-
-      // ==================== SEARCH TOOL ====================
-      {
-        name: 'glpi_search',
-        description: 'Advanced search for items in GLPI using criteria',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            itemtype: { type: 'string', description: 'Type of item to search (Ticket, User, Computer, Software, Problem, Change, etc.)' },
-            field: { type: 'number', description: 'Field ID to search on' },
-            searchtype: { type: 'string', enum: ['contains', 'equals', 'notequals', 'lessthan', 'morethan', 'under', 'notunder'], description: 'Type of search' },
-            value: { type: 'string', description: 'Value to search for' },
-          },
-          required: ['itemtype', 'field', 'searchtype', 'value'],
-        },
-      },
-    ],
-  };
-});
-
-// Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  const { name, arguments: argsRaw } = request.params;
+  const args = (argsRaw ?? {}) as Record<string, unknown>;
 
   try {
     switch (name) {
-      // ==================== TICKET TOOLS ====================
+      // ==== TICKETS — read ====
       case 'glpi_list_tickets': {
-        const limit = (args?.limit as number) || 50;
-        const tickets = await glpiClient.getTickets({
-          range: `0-${limit - 1}`,
-          order: (args?.order as 'ASC' | 'DESC') || 'DESC',
-        });
-
-        const formattedTickets = tickets.map((t: any) => ({
-          id: t.id,
-          name: t.name,
-          status: TICKET_STATUS[t.status] || t.status,
-          urgency: TICKET_URGENCY[t.urgency] || t.urgency,
-          date: t.date,
-          date_mod: t.date_mod,
-        }));
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(formattedTickets, null, 2) }],
-        };
+        const opts = parseListArgs(args);
+        let tickets = await client.getTickets({ ...opts, order: opts.order ?? 'DESC' });
+        if (typeof args.status === 'number') {
+          tickets = tickets.filter((t: any) => t.status === args.status);
+        }
+        return text(tickets.map(formatTicketSummary));
       }
 
       case 'glpi_get_ticket': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Ticket ID is required');
-
-        const ticket = await glpiClient.getTicket(id);
-        const followups = await glpiClient.getTicketFollowups(id);
-        const tasks = await glpiClient.getTicketTasks(id);
-
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              ...ticket,
-              status_label: TICKET_STATUS[ticket.status],
-              urgency_label: TICKET_URGENCY[ticket.urgency],
-              followups_count: followups.length,
-              tasks_count: tasks.length,
-              followups,
-              tasks,
-            }, null, 2),
-          }],
-        };
+        const id = args.id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const [ticket, followups, tasks, solutions] = await Promise.all([
+          client.getTicket(id, { with_logs: args.with_logs as boolean }),
+          client.getTicketFollowups(id),
+          client.getTicketTasks(id),
+          client.getTicketSolutions(id),
+        ]);
+        return text({
+          ...ticket,
+          status_label: TICKET_STATUS[(ticket as any).status],
+          urgency_label: TICKET_URGENCY[(ticket as any).urgency],
+          priority_label: TICKET_URGENCY[(ticket as any).priority],
+          counts: {
+            followups: followups.length,
+            tasks: tasks.length,
+            solutions: solutions.length,
+          },
+        });
       }
 
-      case 'glpi_create_ticket': {
-        const ticketName = args?.name as string;
-        const content = args?.content as string;
-        if (!ticketName || !content) {
-          throw new McpError(ErrorCode.InvalidParams, 'name and content are required');
-        }
+      case 'glpi_get_ticket_timeline': {
+        const id = args.id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const [followups, tasks, solutions, validations] = await Promise.all([
+          client.getTicketFollowups(id),
+          client.getTicketTasks(id),
+          client.getTicketSolutions(id),
+          client.getTicketValidations(id),
+        ]);
+        const timeline = [
+          ...followups.map((f: any) => ({ kind: 'followup', date: f.date_creation ?? f.date, ...f })),
+          ...tasks.map((t: any) => ({ kind: 'task', date: t.date_creation ?? t.date, ...t })),
+          ...solutions.map((s: any) => ({ kind: 'solution', date: s.date_creation ?? s.date, ...s })),
+          ...validations.map((v: any) => ({
+            kind: 'validation',
+            date: v.submission_date ?? v.date_creation ?? v.date,
+            status_label: VALIDATION_STATUS[v.status] ?? v.status,
+            ...v,
+          })),
+        ].sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
+        return text({ ticket_id: id, count: timeline.length, timeline });
+      }
 
-        const result = await glpiClient.createTicket({
-          name: ticketName,
-          content,
-          urgency: (args?.urgency as number) || 3,
-          type: (args?.type as number) || 1,
-          itilcategories_id: args?.category_id as number,
-          _users_id_assign: args?.user_id_assign as number,
-          _groups_id_assign: args?.group_id_assign as number,
+      case 'glpi_search_tickets': {
+        const criteria: SearchCriterion[] = [];
+        const push = (c: SearchCriterion) => {
+          if (criteria.length > 0 && !c.link) c.link = 'AND';
+          criteria.push(c);
+        };
+        if (args.status !== undefined) push({ field: TICKET_FIELDS.status, searchtype: 'equals', value: args.status as number });
+        if (args.assigned_user_id !== undefined) push({ field: TICKET_FIELDS.technician_user, searchtype: 'equals', value: args.assigned_user_id as number });
+        if (args.assigned_group_id !== undefined) push({ field: TICKET_FIELDS.technician_group, searchtype: 'equals', value: args.assigned_group_id as number });
+        if (args.requester_user_id !== undefined) push({ field: TICKET_FIELDS.requester_user, searchtype: 'equals', value: args.requester_user_id as number });
+        if (args.category_id !== undefined) push({ field: TICKET_FIELDS.category, searchtype: 'equals', value: args.category_id as number });
+        if (args.entity_id !== undefined) push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number });
+        if (args.priority !== undefined) push({ field: TICKET_FIELDS.priority, searchtype: 'equals', value: args.priority as number });
+        if (args.urgency !== undefined) push({ field: TICKET_FIELDS.urgency, searchtype: 'equals', value: args.urgency as number });
+        if (args.date_from) push({ field: TICKET_FIELDS.date, searchtype: 'morethan', value: args.date_from as string });
+        if (args.date_to) push({ field: TICKET_FIELDS.date, searchtype: 'lessthan', value: args.date_to as string });
+        if (args.text_search) push({ field: TICKET_FIELDS.name, searchtype: 'contains', value: args.text_search as string });
+        if (args.open_only) push({ field: TICKET_FIELDS.status, searchtype: 'lessthan', value: 5 });
+
+        const result = await client.search.search('Ticket', {
+          criteria,
+          start: (args.start as number) ?? 0,
+          limit: (args.limit as number) ?? 50,
+          fetchAll: args.fetch_all as boolean,
+          maxRows: args.max_rows as number,
+          sort: args.sort as number,
+          order: (args.order as 'ASC' | 'DESC') ?? 'DESC',
+          expandDropdowns: true,
         });
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      case 'glpi_update_ticket': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Ticket ID is required');
-
-        const updates: any = {};
-        if (args?.name) updates.name = args.name;
-        if (args?.content) updates.content = args.content;
-        if (args?.status) updates.status = args.status;
-        if (args?.urgency) updates.urgency = args.urgency;
-
-        await glpiClient.updateTicket(id, updates);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Ticket ${id} updated` }, null, 2) }],
-        };
-      }
-
-      case 'glpi_delete_ticket': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Ticket ID is required');
-
-        await glpiClient.deleteTicket(id, args?.force as boolean);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Ticket ${id} deleted` }, null, 2) }],
-        };
-      }
-
-      case 'glpi_add_followup': {
-        const ticketId = args?.ticket_id as number;
-        const content = args?.content as string;
-        if (!ticketId || !content) {
-          throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content are required');
-        }
-
-        const result = await glpiClient.addTicketFollowup(ticketId, content, args?.is_private as boolean);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, followup_id: result.id }, null, 2) }],
-        };
-      }
-
-      case 'glpi_add_task': {
-        const ticketId = args?.ticket_id as number;
-        const content = args?.content as string;
-        if (!ticketId || !content) {
-          throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content are required');
-        }
-
-        const result = await glpiClient.addTicketTask(ticketId, content, {
-          is_private: args?.is_private as boolean,
-          actiontime: args?.actiontime as number,
-          state: args?.state as number,
-          users_id_tech: args?.users_id_tech as number,
+        return text({
+          totalcount: result.totalcount,
+          count: result.count,
+          data: result.data,
         });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, task_id: result.id }, null, 2) }],
-        };
-      }
-
-      case 'glpi_add_solution': {
-        const ticketId = args?.ticket_id as number;
-        const content = args?.content as string;
-        if (!ticketId || !content) {
-          throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content are required');
-        }
-
-        const result = await glpiClient.addTicketSolution(ticketId, content, args?.solutiontypes_id as number);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, solution_id: result.id }, null, 2) }],
-        };
-      }
-
-      case 'glpi_assign_ticket': {
-        const ticketId = args?.ticket_id as number;
-        const userId = args?.user_id as number;
-        if (!ticketId || !userId) {
-          throw new McpError(ErrorCode.InvalidParams, 'ticket_id and user_id are required');
-        }
-
-        const result = await glpiClient.assignTicket(ticketId, {
-          users_id: userId,
-          type: (args?.type as number) || 2,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, assignment_id: result.id }, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_ticket_tasks': {
-        const ticketId = args?.ticket_id as number;
-        if (!ticketId) throw new McpError(ErrorCode.InvalidParams, 'ticket_id is required');
-
-        const tasks = await glpiClient.getTicketTasks(ticketId);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(tasks, null, 2) }],
-        };
       }
 
       case 'glpi_get_ticket_followups': {
-        const ticketId = args?.ticket_id as number;
-        if (!ticketId) throw new McpError(ErrorCode.InvalidParams, 'ticket_id is required');
-
-        const followups = await glpiClient.getTicketFollowups(ticketId);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(followups, null, 2) }],
-        };
+        const id = args.ticket_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        return text(await client.getTicketFollowups(id));
+      }
+      case 'glpi_get_ticket_tasks': {
+        const id = args.ticket_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        return text(await client.getTicketTasks(id));
+      }
+      case 'glpi_get_ticket_solutions': {
+        const id = args.ticket_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        return text(await client.getTicketSolutions(id));
+      }
+      case 'glpi_get_ticket_validations': {
+        const id = args.ticket_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        return text(await client.getTicketValidations(id));
+      }
+      case 'glpi_get_ticket_documents': {
+        const id = args.ticket_id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        return text(await client.getTicketDocuments(id));
       }
 
-      // ==================== PROBLEM TOOLS ====================
+      // ==== TICKETS — write ====
+      case 'glpi_create_ticket': {
+        const name = args.name as string;
+        const content = args.content as string;
+        if (!name || !content) throw new McpError(ErrorCode.InvalidParams, 'name and content required');
+        const result = await client.createTicket({
+          name,
+          content,
+          urgency: (args.urgency as number) ?? 3,
+          impact: args.impact as number,
+          priority: args.priority as number,
+          type: (args.type as number) ?? 1,
+          itilcategories_id: args.category_id as number,
+          entities_id: args.entity_id as number,
+          _users_id_assign: args.user_id_assign as number,
+          _groups_id_assign: args.group_id_assign as number,
+          _users_id_requester: args.requester_user_id as number,
+          _groups_id_requester: args.requester_group_id as number,
+          time_to_resolve: args.time_to_resolve as string,
+        });
+        return text({ success: true, ...result });
+      }
+
+      case 'glpi_update_ticket': {
+        const id = args.id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const updates: Record<string, unknown> = {};
+        ['name', 'content', 'status', 'urgency', 'priority', 'impact', 'itilcategories_id'].forEach((k) => {
+          if (args[k] !== undefined) updates[k] = args[k];
+        });
+        await client.updateTicket(id, updates as any);
+        return text({ success: true, id });
+      }
+
+      case 'glpi_delete_ticket': {
+        const id = args.id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        await client.deleteTicket(id, args.force as boolean);
+        return text({ success: true, id, purged: !!args.force });
+      }
+
+      case 'glpi_add_followup': {
+        const ticket_id = args.ticket_id as number;
+        const content = args.content as string;
+        if (!ticket_id || !content) throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content required');
+        const result = await client.addTicketFollowup(ticket_id, content, args.is_private as boolean);
+        return text({ success: true, followup_id: result.id });
+      }
+
+      case 'glpi_add_task': {
+        const ticket_id = args.ticket_id as number;
+        const content = args.content as string;
+        if (!ticket_id || !content) throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content required');
+        const result = await client.addTicketTask(ticket_id, content, {
+          is_private: args.is_private as boolean,
+          actiontime: args.actiontime as number,
+          state: args.state as number,
+          users_id_tech: args.users_id_tech as number,
+          groups_id_tech: args.groups_id_tech as number,
+        });
+        return text({ success: true, task_id: result.id });
+      }
+
+      case 'glpi_add_solution': {
+        const ticket_id = args.ticket_id as number;
+        const content = args.content as string;
+        if (!ticket_id || !content) throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content required');
+        const result = await client.addTicketSolution(ticket_id, content, args.solutiontypes_id as number);
+        return text({ success: true, solution_id: result.id });
+      }
+
+      case 'glpi_assign_ticket': {
+        const ticket_id = args.ticket_id as number;
+        if (!ticket_id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        const user_id = args.user_id as number;
+        const group_id = args.group_id as number;
+        if (!user_id && !group_id) {
+          throw new McpError(ErrorCode.InvalidParams, 'user_id or group_id required');
+        }
+        const result = await client.assignTicket(ticket_id, {
+          users_id: user_id,
+          groups_id: group_id,
+          type: args.type as number,
+        });
+        return text({ success: true, assignment_id: result.id });
+      }
+
+      case 'glpi_link_tickets': {
+        const parent_id = args.parent_id as number;
+        const child_id = args.child_id as number;
+        if (!parent_id || !child_id) throw new McpError(ErrorCode.InvalidParams, 'parent_id and child_id required');
+        const result = await client.linkTickets(parent_id, child_id, (args.link_type as number) ?? 1);
+        return text({ success: true, link_id: result.id });
+      }
+
+      case 'glpi_add_ticket_validation': {
+        const ticket_id = args.ticket_id as number;
+        const users_id_validate = args.users_id_validate as number;
+        if (!ticket_id || !users_id_validate) {
+          throw new McpError(ErrorCode.InvalidParams, 'ticket_id and users_id_validate required');
+        }
+        const result = await client.addTicketValidation(ticket_id, {
+          users_id_validate,
+          comment_submission: args.comment_submission as string,
+        });
+        return text({ success: true, validation_id: result.id });
+      }
+
+      case 'glpi_set_validation_status': {
+        const validation_id = args.validation_id as number;
+        const status = args.status as 2 | 3;
+        if (!validation_id || (status !== 2 && status !== 3)) {
+          throw new McpError(ErrorCode.InvalidParams, 'validation_id and status (2 or 3) required');
+        }
+        await client.setTicketValidationStatus(
+          validation_id,
+          status,
+          args.comment_validation as string
+        );
+        return text({ success: true, validation_id, status_label: VALIDATION_STATUS[status] });
+      }
+
+      case 'glpi_attach_document_to_ticket': {
+        const ticket_id = args.ticket_id as number;
+        const document_id = args.document_id as number;
+        if (!ticket_id || !document_id) {
+          throw new McpError(ErrorCode.InvalidParams, 'ticket_id and document_id required');
+        }
+        const result = await client.attachDocumentToTicket(ticket_id, document_id);
+        return text({ success: true, link_id: result.id });
+      }
+
+      case 'glpi_get_ticket_satisfaction': {
+        const ticket_id = args.ticket_id as number;
+        if (!ticket_id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        return text(await client.getTicketSatisfaction(ticket_id));
+      }
+
+      case 'glpi_list_overdue_tickets': {
+        const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        const criteria: SearchCriterion[] = [
+          { field: TICKET_FIELDS.status, searchtype: 'lessthan', value: 5 },
+          // time_to_resolve search-option id is typically 18; fall back to 18.
+          { field: 18, searchtype: 'lessthan', value: now, link: 'AND' },
+          { field: 18, searchtype: 'notempty', value: '', link: 'AND' },
+        ];
+        if (args.entity_id !== undefined) {
+          criteria.push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number, link: 'AND' });
+        }
+        const result = await client.search.search('Ticket', {
+          criteria,
+          limit: (args.limit as number) ?? 50,
+          expandDropdowns: true,
+          order: 'ASC',
+          sort: 18,
+        });
+        return text({
+          totalcount: result.totalcount,
+          count: result.count,
+          data: result.data,
+        });
+      }
+
+      // ==== PROBLEMS / CHANGES ====
       case 'glpi_list_problems': {
-        const limit = (args?.limit as number) || 50;
-        const problems = await glpiClient.getProblems({
-          range: `0-${limit - 1}`,
-          order: (args?.order as 'ASC' | 'DESC') || 'DESC',
-        });
-
-        const formatted = problems.map((p: any) => ({
-          id: p.id,
-          name: p.name,
-          status: PROBLEM_STATUS[p.status] || p.status,
-          urgency: TICKET_URGENCY[p.urgency] || p.urgency,
+        const list = await client.getProblems({ ...parseListArgs(args), order: 'DESC' });
+        return text(list.map((p: any) => ({
+          id: p.id, name: p.name,
+          status: PROBLEM_STATUS[p.status] ?? p.status,
+          urgency: TICKET_URGENCY[p.urgency] ?? p.urgency,
           date: p.date,
-        }));
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }],
-        };
+        })));
       }
-
       case 'glpi_get_problem': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Problem ID is required');
-
-        const problem = await glpiClient.getProblem(id);
-
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              ...problem,
-              status_label: PROBLEM_STATUS[problem.status],
-              urgency_label: TICKET_URGENCY[problem.urgency],
-            }, null, 2),
-          }],
-        };
+        const id = args.id as number;
+        const p = await client.getProblem(id);
+        return text({
+          ...p,
+          status_label: PROBLEM_STATUS[(p as any).status],
+          urgency_label: TICKET_URGENCY[(p as any).urgency],
+        });
       }
-
       case 'glpi_create_problem': {
-        const problemName = args?.name as string;
-        const content = args?.content as string;
-        if (!problemName || !content) {
-          throw new McpError(ErrorCode.InvalidParams, 'name and content are required');
-        }
-
-        const result = await glpiClient.createProblem({
-          name: problemName,
-          content,
-          urgency: args?.urgency as number,
-          impact: args?.impact as number,
-          priority: args?.priority as number,
-          itilcategories_id: args?.category_id as number,
+        const result = await client.createProblem({
+          name: args.name as string,
+          content: args.content as string,
+          urgency: args.urgency as number,
+          impact: args.impact as number,
+          priority: args.priority as number,
+          itilcategories_id: args.category_id as number,
         });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
+        return text({ success: true, ...result });
       }
-
       case 'glpi_update_problem': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Problem ID is required');
-
-        const updates: any = {};
-        if (args?.name) updates.name = args.name;
-        if (args?.content) updates.content = args.content;
-        if (args?.status) updates.status = args.status;
-        if (args?.urgency) updates.urgency = args.urgency;
-
-        await glpiClient.updateProblem(id, updates);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Problem ${id} updated` }, null, 2) }],
-        };
+        const id = args.id as number;
+        const updates: Record<string, unknown> = {};
+        ['name', 'content', 'status', 'urgency'].forEach((k) => {
+          if (args[k] !== undefined) updates[k] = args[k];
+        });
+        await client.updateProblem(id, updates as any);
+        return text({ success: true, id });
       }
 
-      // ==================== CHANGE TOOLS ====================
       case 'glpi_list_changes': {
-        const limit = (args?.limit as number) || 50;
-        const changes = await glpiClient.getChanges({
-          range: `0-${limit - 1}`,
-          order: (args?.order as 'ASC' | 'DESC') || 'DESC',
-        });
-
-        const formatted = changes.map((c: any) => ({
-          id: c.id,
-          name: c.name,
-          status: CHANGE_STATUS[c.status] || c.status,
-          urgency: TICKET_URGENCY[c.urgency] || c.urgency,
+        const list = await client.getChanges({ ...parseListArgs(args), order: 'DESC' });
+        return text(list.map((c: any) => ({
+          id: c.id, name: c.name,
+          status: CHANGE_STATUS[c.status] ?? c.status,
+          urgency: TICKET_URGENCY[c.urgency] ?? c.urgency,
           date: c.date,
+        })));
+      }
+      case 'glpi_get_change': {
+        const id = args.id as number;
+        const c = await client.getChange(id);
+        return text({
+          ...c,
+          status_label: CHANGE_STATUS[(c as any).status],
+          urgency_label: TICKET_URGENCY[(c as any).urgency],
+        });
+      }
+      case 'glpi_create_change': {
+        const result = await client.createChange({
+          name: args.name as string,
+          content: args.content as string,
+          urgency: args.urgency as number,
+          impact: args.impact as number,
+          priority: args.priority as number,
+          itilcategories_id: args.category_id as number,
+        });
+        return text({ success: true, ...result });
+      }
+      case 'glpi_update_change': {
+        const id = args.id as number;
+        const updates: Record<string, unknown> = {};
+        ['name', 'content', 'status'].forEach((k) => {
+          if (args[k] !== undefined) updates[k] = args[k];
+        });
+        await client.updateChange(id, updates as any);
+        return text({ success: true, id });
+      }
+
+      // ==== ASSETS ====
+      case 'glpi_list_computers':
+        return text(await client.getComputers(parseListArgs(args)));
+      case 'glpi_get_computer':
+        return text(await client.getComputer(args.id as number, {
+          with_softwares: args.with_softwares as boolean,
+          with_connections: args.with_connections as boolean,
+          with_networkports: args.with_networkports as boolean,
+          with_documents: args.with_documents as boolean,
+        }));
+      case 'glpi_create_computer':
+        return text({ success: true, ...(await client.createComputer(args)) });
+      case 'glpi_update_computer': {
+        const id = args.id as number;
+        const updates = { ...args }; delete (updates as any).id;
+        await client.updateComputer(id, updates as any);
+        return text({ success: true, id });
+      }
+      case 'glpi_delete_computer':
+        await client.deleteComputer(args.id as number, args.force as boolean);
+        return text({ success: true, id: args.id, purged: !!args.force });
+
+      case 'glpi_list_softwares':
+        return text(await client.getSoftwares(parseListArgs(args)));
+      case 'glpi_get_software':
+        return text(await client.getSoftware(args.id as number));
+      case 'glpi_create_software':
+        return text({ success: true, ...(await client.createSoftware(args)) });
+
+      case 'glpi_list_network_equipments':
+        return text(await client.getNetworkEquipments(parseListArgs(args)));
+      case 'glpi_get_network_equipment':
+        return text(await client.getNetworkEquipment(args.id as number, {
+          with_networkports: args.with_networkports as boolean,
         }));
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }],
-        };
-      }
+      case 'glpi_list_printers':
+        return text(await client.getPrinters(parseListArgs(args)));
+      case 'glpi_get_printer':
+        return text(await client.getPrinter(args.id as number));
 
-      case 'glpi_get_change': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Change ID is required');
+      case 'glpi_list_monitors':
+        return text(await client.getMonitors(parseListArgs(args)));
+      case 'glpi_get_monitor':
+        return text(await client.getMonitor(args.id as number));
 
-        const change = await glpiClient.getChange(id);
+      case 'glpi_list_phones':
+        return text(await client.getPhones(parseListArgs(args)));
+      case 'glpi_get_phone':
+        return text(await client.getPhone(args.id as number));
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              ...change,
-              status_label: CHANGE_STATUS[change.status],
-              urgency_label: TICKET_URGENCY[change.urgency],
-            }, null, 2),
-          }],
-        };
-      }
-
-      case 'glpi_create_change': {
-        const changeName = args?.name as string;
-        const content = args?.content as string;
-        if (!changeName || !content) {
-          throw new McpError(ErrorCode.InvalidParams, 'name and content are required');
-        }
-
-        const result = await glpiClient.createChange({
-          name: changeName,
-          content,
-          urgency: args?.urgency as number,
-          impact: args?.impact as number,
-          priority: args?.priority as number,
-          itilcategories_id: args?.category_id as number,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      case 'glpi_update_change': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Change ID is required');
-
-        const updates: any = {};
-        if (args?.name) updates.name = args.name;
-        if (args?.content) updates.content = args.content;
-        if (args?.status) updates.status = args.status;
-
-        await glpiClient.updateChange(id, updates);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Change ${id} updated` }, null, 2) }],
-        };
-      }
-
-      // ==================== COMPUTER TOOLS ====================
-      case 'glpi_list_computers': {
-        const limit = (args?.limit as number) || 50;
-        const computers = await glpiClient.getComputers({
-          range: `0-${limit - 1}`,
-          is_deleted: args?.include_deleted as boolean,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(computers, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_computer': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Computer ID is required');
-
-        const computer = await glpiClient.getComputer(id, {
-          with_softwares: args?.with_softwares as boolean,
-          with_connections: args?.with_connections as boolean,
-          with_networkports: args?.with_networkports as boolean,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(computer, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_computer': {
-        const computerName = args?.name as string;
-        if (!computerName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createComputer({
-          name: computerName,
-          serial: args?.serial as string,
-          otherserial: args?.otherserial as string,
-          contact: args?.contact as string,
-          comment: args?.comment as string,
-          locations_id: args?.locations_id as number,
-          states_id: args?.states_id as number,
-          computertypes_id: args?.computertypes_id as number,
-          manufacturers_id: args?.manufacturers_id as number,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      case 'glpi_update_computer': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Computer ID is required');
-
-        const updates: any = {};
-        if (args?.name) updates.name = args.name;
-        if (args?.serial) updates.serial = args.serial;
-        if (args?.comment) updates.comment = args.comment;
-        if (args?.locations_id) updates.locations_id = args.locations_id;
-        if (args?.states_id) updates.states_id = args.states_id;
-
-        await glpiClient.updateComputer(id, updates);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Computer ${id} updated` }, null, 2) }],
-        };
-      }
-
-      case 'glpi_delete_computer': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Computer ID is required');
-
-        await glpiClient.deleteComputer(id, args?.force as boolean);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Computer ${id} deleted` }, null, 2) }],
-        };
-      }
-
-      // ==================== SOFTWARE TOOLS ====================
-      case 'glpi_list_softwares': {
-        const limit = (args?.limit as number) || 50;
-        const softwares = await glpiClient.getSoftwares({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(softwares, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_software': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Software ID is required');
-
-        const software = await glpiClient.getSoftware(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(software, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_software': {
-        const softwareName = args?.name as string;
-        if (!softwareName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createSoftware({
-          name: softwareName,
-          comment: args?.comment as string,
-          manufacturers_id: args?.manufacturers_id as number,
-          softwarecategories_id: args?.softwarecategories_id as number,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      // ==================== NETWORK EQUIPMENT TOOLS ====================
-      case 'glpi_list_network_equipments': {
-        const limit = (args?.limit as number) || 50;
-        const equipments = await glpiClient.getNetworkEquipments({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(equipments, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_network_equipment': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Equipment ID is required');
-
-        const equipment = await glpiClient.getNetworkEquipment(id, {
-          with_networkports: args?.with_networkports as boolean,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(equipment, null, 2) }],
-        };
-      }
-
-      // ==================== PRINTER TOOLS ====================
-      case 'glpi_list_printers': {
-        const limit = (args?.limit as number) || 50;
-        const printers = await glpiClient.getPrinters({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(printers, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_printer': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Printer ID is required');
-
-        const printer = await glpiClient.getPrinter(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(printer, null, 2) }],
-        };
-      }
-
-      // ==================== MONITOR TOOLS ====================
-      case 'glpi_list_monitors': {
-        const limit = (args?.limit as number) || 50;
-        const monitors = await glpiClient.getMonitors({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(monitors, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_monitor': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Monitor ID is required');
-
-        const monitor = await glpiClient.getMonitor(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(monitor, null, 2) }],
-        };
-      }
-
-      // ==================== PHONE TOOLS ====================
-      case 'glpi_list_phones': {
-        const limit = (args?.limit as number) || 50;
-        const phones = await glpiClient.getPhones({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(phones, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_phone': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Phone ID is required');
-
-        const phone = await glpiClient.getPhone(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(phone, null, 2) }],
-        };
-      }
-
-      // ==================== KNOWLEDGE BASE TOOLS ====================
-      case 'glpi_list_knowbase': {
-        const limit = (args?.limit as number) || 50;
-        const items = await glpiClient.getKnowbaseItems({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(items, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_knowbase_item': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Article ID is required');
-
-        const item = await glpiClient.getKnowbaseItem(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(item, null, 2) }],
-        };
-      }
-
-      case 'glpi_search_knowbase': {
-        const query = args?.query as string;
-        if (!query) throw new McpError(ErrorCode.InvalidParams, 'query is required');
-
-        const results = await glpiClient.searchKnowbase(query);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
-        };
-      }
-
+      // ==== KB / CONTRACTS / SUPPLIERS / LOCATIONS / PROJECTS ====
+      case 'glpi_list_knowbase':
+        return text(await client.getKnowbaseItems(parseListArgs(args)));
+      case 'glpi_get_knowbase_item':
+        return text(await client.getKnowbaseItem(args.id as number));
+      case 'glpi_search_knowbase':
+        return text(await client.searchKnowbase(args.query as string, (args.limit as number) ?? 50));
       case 'glpi_create_knowbase_item': {
-        const itemName = args?.name as string;
-        const answer = args?.answer as string;
-        if (!itemName || !answer) {
-          throw new McpError(ErrorCode.InvalidParams, 'name and answer are required');
-        }
-
-        const result = await glpiClient.createKnowbaseItem({
-          name: itemName,
-          answer,
-          is_faq: args?.is_faq ? 1 : 0,
-          knowbaseitemcategories_id: args?.knowbaseitemcategories_id as number,
+        const result = await client.createKnowbaseItem({
+          name: args.name as string,
+          answer: args.answer as string,
+          is_faq: args.is_faq ? 1 : 0,
+          knowbaseitemcategories_id: args.knowbaseitemcategories_id as number,
         });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
+        return text({ success: true, ...result });
       }
 
-      // ==================== CONTRACT TOOLS ====================
-      case 'glpi_list_contracts': {
-        const limit = (args?.limit as number) || 50;
-        const contracts = await glpiClient.getContracts({ range: `0-${limit - 1}` });
+      case 'glpi_list_contracts':
+        return text(await client.getContracts(parseListArgs(args)));
+      case 'glpi_get_contract':
+        return text(await client.getContract(args.id as number));
+      case 'glpi_create_contract':
+        return text({ success: true, ...(await client.createContract(args)) });
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify(contracts, null, 2) }],
-        };
-      }
+      case 'glpi_list_suppliers':
+        return text(await client.getSuppliers(parseListArgs(args)));
+      case 'glpi_get_supplier':
+        return text(await client.getSupplier(args.id as number));
+      case 'glpi_create_supplier':
+        return text({ success: true, ...(await client.createSupplier(args)) });
 
-      case 'glpi_get_contract': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Contract ID is required');
+      case 'glpi_list_locations':
+        return text(await client.getLocations(parseListArgs(args)));
+      case 'glpi_get_location':
+        return text(await client.getLocation(args.id as number));
+      case 'glpi_create_location':
+        return text({ success: true, ...(await client.createLocation(args)) });
 
-        const contract = await glpiClient.getContract(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(contract, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_contract': {
-        const contractName = args?.name as string;
-        if (!contractName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createContract({
-          name: contractName,
-          num: args?.num as string,
-          begin_date: args?.begin_date as string,
-          duration: args?.duration as number,
-          notice: args?.notice as number,
-          comment: args?.comment as string,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      // ==================== SUPPLIER TOOLS ====================
-      case 'glpi_list_suppliers': {
-        const limit = (args?.limit as number) || 50;
-        const suppliers = await glpiClient.getSuppliers({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(suppliers, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_supplier': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Supplier ID is required');
-
-        const supplier = await glpiClient.getSupplier(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(supplier, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_supplier': {
-        const supplierName = args?.name as string;
-        if (!supplierName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createSupplier({
-          name: supplierName,
-          address: args?.address as string,
-          postcode: args?.postcode as string,
-          town: args?.town as string,
-          country: args?.country as string,
-          website: args?.website as string,
-          phonenumber: args?.phonenumber as string,
-          email: args?.email as string,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      // ==================== LOCATION TOOLS ====================
-      case 'glpi_list_locations': {
-        const limit = (args?.limit as number) || 50;
-        const locations = await glpiClient.getLocations({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(locations, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_location': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Location ID is required');
-
-        const location = await glpiClient.getLocation(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(location, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_location': {
-        const locationName = args?.name as string;
-        if (!locationName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createLocation({
-          name: locationName,
-          address: args?.address as string,
-          postcode: args?.postcode as string,
-          town: args?.town as string,
-          building: args?.building as string,
-          room: args?.room as string,
-          locations_id: args?.locations_id as number,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      // ==================== PROJECT TOOLS ====================
-      case 'glpi_list_projects': {
-        const limit = (args?.limit as number) || 50;
-        const projects = await glpiClient.getProjects({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(projects, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_project': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Project ID is required');
-
-        const project = await glpiClient.getProject(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(project, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_project': {
-        const projectName = args?.name as string;
-        if (!projectName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createProject({
-          name: projectName,
-          code: args?.code as string,
-          content: args?.content as string,
-          priority: args?.priority as number,
-          plan_start_date: args?.plan_start_date as string,
-          plan_end_date: args?.plan_end_date as string,
-          users_id: args?.users_id as number,
-          groups_id: args?.groups_id as number,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
+      case 'glpi_list_projects':
+        return text(await client.getProjects(parseListArgs(args)));
+      case 'glpi_get_project':
+        return text(await client.getProject(args.id as number));
+      case 'glpi_create_project':
+        return text({ success: true, ...(await client.createProject(args)) });
       case 'glpi_update_project': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Project ID is required');
-
-        const updates: any = {};
-        if (args?.name) updates.name = args.name;
-        if (args?.content) updates.content = args.content;
-        if (args?.percent_done !== undefined) updates.percent_done = args.percent_done;
-        if (args?.real_start_date) updates.real_start_date = args.real_start_date;
-        if (args?.real_end_date) updates.real_end_date = args.real_end_date;
-
-        await glpiClient.updateProject(id, updates);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, message: `Project ${id} updated` }, null, 2) }],
-        };
-      }
-
-      // ==================== USER TOOLS ====================
-      case 'glpi_list_users': {
-        const limit = (args?.limit as number) || 50;
-        const users = await glpiClient.getUsers({
-          range: `0-${limit - 1}`,
-          is_active: args?.active_only !== false,
+        const id = args.id as number;
+        const updates: Record<string, unknown> = {};
+        ['name', 'content', 'percent_done', 'real_start_date', 'real_end_date'].forEach((k) => {
+          if (args[k] !== undefined) updates[k] = args[k];
         });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(users, null, 2) }],
-        };
+        await client.updateProject(id, updates as any);
+        return text({ success: true, id });
       }
 
-      case 'glpi_get_user': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'User ID is required');
+      // ==== USERS / GROUPS ====
+      case 'glpi_list_users':
+        return text(await client.getUsers({
+          ...parseListArgs(args),
+          is_active: args.active_only === false ? false : true,
+        }));
+      case 'glpi_get_user':
+        return text(await client.getUser(args.id as number));
+      case 'glpi_search_user':
+        return text(await client.getUserByName(args.name as string));
+      case 'glpi_create_user':
+        return text({ success: true, ...(await client.createUser({
+          name: args.name as string,
+          password: args.password as string,
+          realname: args.realname as string,
+          firstname: args.firstname as string,
+          email: args.email as string,
+          phone: args.phone as string,
+          profiles_id: args.profiles_id as number,
+        })) });
 
-        const user = await glpiClient.getUser(id);
+      case 'glpi_list_groups':
+        return text(await client.getGroups(parseListArgs(args)));
+      case 'glpi_get_group':
+        return text(await client.getGroup(args.id as number));
+      case 'glpi_create_group':
+        return text({ success: true, ...(await client.createGroup({
+          name: args.name as string,
+          comment: args.comment as string,
+          is_requester: args.is_requester ? 1 : 0,
+          is_assign: args.is_assign ? 1 : 0,
+        })) });
+      case 'glpi_add_user_to_group':
+        return text({ success: true, ...(await client.addUserToGroup(
+          args.user_id as number,
+          args.group_id as number,
+          args.is_manager as boolean
+        )) });
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify(user, null, 2) }],
-        };
-      }
+      case 'glpi_list_categories':
+        return text(await client.getCategories(parseListArgs(args)));
+      case 'glpi_list_entities':
+        return text(await client.getEntities(parseListArgs(args)));
+      case 'glpi_get_entity':
+        return text(await client.getEntity(args.id as number));
+      case 'glpi_list_documents':
+        return text(await client.getDocuments(parseListArgs(args)));
+      case 'glpi_get_document':
+        return text(await client.getDocument(args.id as number));
 
-      case 'glpi_search_user': {
-        const userName = args?.name as string;
-        if (!userName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const user = await glpiClient.getUserByName(userName);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(user, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_user': {
-        const userName = args?.name as string;
-        if (!userName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createUser({
-          name: userName,
-          password: args?.password as string,
-          realname: args?.realname as string,
-          firstname: args?.firstname as string,
-          email: args?.email as string,
-          phone: args?.phone as string,
-          profiles_id: args?.profiles_id as number,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      // ==================== GROUP TOOLS ====================
-      case 'glpi_list_groups': {
-        const limit = (args?.limit as number) || 50;
-        const groups = await glpiClient.getGroups({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(groups, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_group': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Group ID is required');
-
-        const group = await glpiClient.getGroup(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(group, null, 2) }],
-        };
-      }
-
-      case 'glpi_create_group': {
-        const groupName = args?.name as string;
-        if (!groupName) throw new McpError(ErrorCode.InvalidParams, 'name is required');
-
-        const result = await glpiClient.createGroup({
-          name: groupName,
-          comment: args?.comment as string,
-          is_requester: args?.is_requester ? 1 : 0,
-          is_assign: args?.is_assign ? 1 : 0,
-        });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      case 'glpi_add_user_to_group': {
-        const userId = args?.user_id as number;
-        const groupId = args?.group_id as number;
-        if (!userId || !groupId) {
-          throw new McpError(ErrorCode.InvalidParams, 'user_id and group_id are required');
-        }
-
-        const result = await glpiClient.addUserToGroup(userId, groupId, args?.is_manager as boolean);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ success: true, ...result }, null, 2) }],
-        };
-      }
-
-      // ==================== CATEGORY TOOLS ====================
-      case 'glpi_list_categories': {
-        const limit = (args?.limit as number) || 50;
-        const categories = await glpiClient.getCategories({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(categories, null, 2) }],
-        };
-      }
-
-      // ==================== ENTITY TOOLS ====================
-      case 'glpi_list_entities': {
-        const limit = (args?.limit as number) || 50;
-        const entities = await glpiClient.getEntities({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(entities, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_entity': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Entity ID is required');
-
-        const entity = await glpiClient.getEntity(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(entity, null, 2) }],
-        };
-      }
-
-      // ==================== DOCUMENT TOOLS ====================
-      case 'glpi_list_documents': {
-        const limit = (args?.limit as number) || 50;
-        const documents = await glpiClient.getDocuments({ range: `0-${limit - 1}` });
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(documents, null, 2) }],
-        };
-      }
-
-      case 'glpi_get_document': {
-        const id = args?.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'Document ID is required');
-
-        const document = await glpiClient.getDocument(id);
-
-        return {
-          content: [{ type: 'text', text: JSON.stringify(document, null, 2) }],
-        };
-      }
-
-      // ==================== STATISTICS TOOLS ====================
+      // ==== STATS ====
       case 'glpi_get_ticket_stats': {
-        const stats = await glpiClient.getTicketStats();
-
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              ...stats,
-              summary: `Total: ${stats.total} tickets - ${stats.new} new, ${stats.processing} processing, ${stats.pending} pending, ${stats.solved} solved, ${stats.closed} closed`,
-            }, null, 2),
-          }],
-        };
+        const stats = await client.getTicketStats({
+          entity_id: args.entity_id as number,
+          date_from: args.date_from as string,
+          date_to: args.date_to as string,
+        });
+        return text({
+          ...stats,
+          summary: `${stats.total} tickets — new:${stats.new} processing:${stats.processing} pending:${stats.pending} solved:${stats.solved} closed:${stats.closed}`,
+        });
       }
 
       case 'glpi_get_asset_stats': {
-        const stats = await glpiClient.getAssetStats();
-
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              ...stats,
-              total: stats.computers + stats.monitors + stats.printers + stats.networkEquipments + stats.phones,
-            }, null, 2),
-          }],
-        };
+        const stats = await client.getAssetStats();
+        return text({ ...stats, total: stats.computers + stats.monitors + stats.printers + stats.networkEquipments + stats.phones });
       }
 
-      // ==================== SESSION TOOLS ====================
-      case 'glpi_get_session_info': {
-        const [profile, profiles, entities] = await Promise.all([
-          glpiClient.getActiveProfile(),
-          glpiClient.getMyProfiles(),
-          glpiClient.getMyEntities(),
-        ]);
+      case 'glpi_tickets_stats_by': {
+        const dimension = args.dimension as 'status' | 'category' | 'technician' | 'entity' | 'month';
+        const base: SearchCriterion[] = [];
+        if (args.entity_id !== undefined) base.push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number });
+        if (args.date_from) base.push({ field: TICKET_FIELDS.date, searchtype: 'morethan', value: args.date_from as string, link: 'AND' });
+        if (args.date_to) base.push({ field: TICKET_FIELDS.date, searchtype: 'lessthan', value: args.date_to as string, link: 'AND' });
 
-        return {
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              active_profile: profile,
-              available_profiles: profiles,
-              entities,
-            }, null, 2),
-          }],
-        };
-      }
+        const counts: Record<string, number> = {};
 
-      // ==================== SEARCH TOOL ====================
-      case 'glpi_search': {
-        const itemtype = args?.itemtype as string;
-        const field = args?.field as number;
-        const searchtype = args?.searchtype as string;
-        const value = args?.value as string;
-
-        if (!itemtype || field === undefined || !searchtype || value === undefined) {
-          throw new McpError(ErrorCode.InvalidParams, 'itemtype, field, searchtype, and value are required');
+        if (dimension === 'status') {
+          for (const [statusId, label] of Object.entries(TICKET_STATUS)) {
+            const c: SearchCriterion[] = [
+              { field: TICKET_FIELDS.status, searchtype: 'equals', value: Number(statusId) },
+              ...base.map((b, i) => ({ ...b, link: 'AND' as const })),
+            ];
+            counts[label] = await client.search.count('Ticket', c);
+          }
+        } else if (dimension === 'category') {
+          const cats = await client.getCategories({ range: '0-199' });
+          for (const cat of cats as any[]) {
+            const c: SearchCriterion[] = [
+              { field: TICKET_FIELDS.category, searchtype: 'equals', value: cat.id },
+              ...base.map((b) => ({ ...b, link: 'AND' as const })),
+            ];
+            const n = await client.search.count('Ticket', c);
+            if (n > 0) counts[cat.completename ?? cat.name] = n;
+          }
+        } else if (dimension === 'technician') {
+          const users = await client.getUsers({ range: '0-199', is_active: true });
+          for (const u of users) {
+            const c: SearchCriterion[] = [
+              { field: TICKET_FIELDS.technician_user, searchtype: 'equals', value: u.id },
+              ...base.map((b) => ({ ...b, link: 'AND' as const })),
+            ];
+            const n = await client.search.count('Ticket', c);
+            if (n > 0) counts[`${u.firstname ?? ''} ${u.realname ?? ''} (${u.name})`.trim()] = n;
+          }
+        } else if (dimension === 'entity') {
+          const entities = await client.getEntities({ range: '0-99' });
+          for (const e of entities as any[]) {
+            const c: SearchCriterion[] = [
+              { field: TICKET_FIELDS.entity, searchtype: 'equals', value: e.id },
+              ...base.map((b) => ({ ...b, link: 'AND' as const })),
+            ];
+            const n = await client.search.count('Ticket', c);
+            if (n > 0) counts[e.completename ?? e.name] = n;
+          }
+        } else if (dimension === 'month') {
+          // Compute monthly buckets between date_from and date_to (or last 6 months).
+          const to = args.date_to ? new Date(args.date_to as string) : new Date();
+          const from = args.date_from ? new Date(args.date_from as string) : new Date(to.getFullYear(), to.getMonth() - 5, 1);
+          const cursor = new Date(from.getFullYear(), from.getMonth(), 1);
+          while (cursor <= to) {
+            const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+            const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+            const fmt = (d: Date) => d.toISOString().slice(0, 10) + ' 00:00:00';
+            const monthCriteria: SearchCriterion[] = [
+              { field: TICKET_FIELDS.date, searchtype: 'morethan', value: fmt(monthStart) },
+              { field: TICKET_FIELDS.date, searchtype: 'lessthan', value: fmt(monthEnd), link: 'AND' },
+            ];
+            if (args.entity_id !== undefined) {
+              monthCriteria.push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number, link: 'AND' });
+            }
+            const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
+            counts[key] = await client.search.count('Ticket', monthCriteria);
+            cursor.setMonth(cursor.getMonth() + 1);
+          }
+        } else {
+          throw new McpError(ErrorCode.InvalidParams, `Unknown dimension: ${dimension}`);
         }
 
-        const results = await glpiClient.search(itemtype, [
-          { field, searchtype: searchtype as any, value },
-        ]);
+        return text({ dimension, counts, total: Object.values(counts).reduce((s, n) => s + n, 0) });
+      }
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
-        };
+      // ==== SESSION ====
+      case 'glpi_get_session_info': {
+        const [profile, profiles, entities] = await Promise.all([
+          client.getActiveProfile(),
+          client.getMyProfiles(),
+          client.getMyEntities(),
+        ]);
+        return text({ active_profile: profile, available_profiles: profiles, entities });
+      }
+
+      // ==== SEARCH ====
+      case 'glpi_search_v2': {
+        const itemtype = args.itemtype as string;
+        if (!itemtype) throw new McpError(ErrorCode.InvalidParams, 'itemtype required');
+        const rawCriteria = (args.criteria as CriteriaArg[]) ?? [];
+        const criteria = await resolveCriteria(client, itemtype, rawCriteria);
+        const result = await client.search.search(itemtype, {
+          criteria,
+          forcedisplay: args.forcedisplay as number[],
+          start: args.start as number,
+          limit: args.limit as number,
+          sort: args.sort as number,
+          order: args.order as 'ASC' | 'DESC',
+          fetchAll: args.fetch_all as boolean,
+          maxRows: args.max_rows as number,
+          expandDropdowns: args.expand_dropdowns !== false,
+        });
+        return text(result);
+      }
+
+      case 'glpi_count': {
+        const itemtype = args.itemtype as string;
+        if (!itemtype) throw new McpError(ErrorCode.InvalidParams, 'itemtype required');
+        const rawCriteria = (args.criteria as CriteriaArg[]) ?? [];
+        const criteria = await resolveCriteria(client, itemtype, rawCriteria);
+        const totalcount = await client.search.count(itemtype, criteria);
+        return text({ itemtype, totalcount });
+      }
+
+      case 'glpi_list_search_options': {
+        const itemtype = args.itemtype as string;
+        if (!itemtype) throw new McpError(ErrorCode.InvalidParams, 'itemtype required');
+        const cat = await client.searchOptions.get(itemtype);
+        const entries = Array.from(cat.byId.values()).map((o) => ({
+          id: o.id, name: o.name, uid: o.uid, table: o.table,
+          field: o.field, datatype: o.datatype,
+          available_searchtypes: o.available_searchtypes,
+        }));
+        return text({ itemtype, count: entries.length, options: entries });
+      }
+
+      // legacy
+      case 'glpi_search': {
+        const itemtype = args.itemtype as string;
+        const field = args.field as number;
+        const searchtype = args.searchtype as SearchType;
+        const value = args.value as string;
+        if (!itemtype || field === undefined || !searchtype || value === undefined) {
+          throw new McpError(ErrorCode.InvalidParams, 'itemtype, field, searchtype, value required');
+        }
+        const result = await client.search.search(itemtype, {
+          criteria: [{ field, searchtype, value }],
+          expandDropdowns: true,
+        });
+        return text(result);
       }
 
       default:
@@ -1996,176 +1664,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Define available resources
-server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  return {
-    resources: [
-      {
-        uri: 'glpi://tickets/open',
-        name: 'Open Tickets',
-        description: 'List of all open tickets (status: New, Processing, Pending)',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://tickets/recent',
-        name: 'Recent Tickets',
-        description: 'Most recently modified tickets',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://problems/open',
-        name: 'Open Problems',
-        description: 'List of all open problems',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://changes/pending',
-        name: 'Pending Changes',
-        description: 'List of pending change requests',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://computers',
-        name: 'Computers',
-        description: 'List of all computers in inventory',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://groups',
-        name: 'Groups',
-        description: 'List of all groups',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://categories',
-        name: 'Categories',
-        description: 'List of ticket categories',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://stats/tickets',
-        name: 'Ticket Statistics',
-        description: 'Ticket counts by status',
-        mimeType: 'application/json',
-      },
-      {
-        uri: 'glpi://stats/assets',
-        name: 'Asset Statistics',
-        description: 'Asset inventory counts',
-        mimeType: 'application/json',
-      },
-    ],
-  };
-});
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
 
-// Handle resource reads
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  resources: [
+    { uri: 'glpi://tickets/open', name: 'Open Tickets', description: 'Tickets with status < 5', mimeType: 'application/json' },
+    { uri: 'glpi://tickets/recent', name: 'Recent Tickets', description: 'Most recent tickets', mimeType: 'application/json' },
+    { uri: 'glpi://problems/open', name: 'Open Problems', description: 'Open problems', mimeType: 'application/json' },
+    { uri: 'glpi://changes/pending', name: 'Pending Changes', description: 'Pending changes', mimeType: 'application/json' },
+    { uri: 'glpi://computers', name: 'Computers', description: 'Computers', mimeType: 'application/json' },
+    { uri: 'glpi://groups', name: 'Groups', description: 'Groups', mimeType: 'application/json' },
+    { uri: 'glpi://categories', name: 'Categories', description: 'ITIL categories', mimeType: 'application/json' },
+    { uri: 'glpi://stats/tickets', name: 'Ticket Statistics', description: 'Ticket counts', mimeType: 'application/json' },
+    { uri: 'glpi://stats/assets', name: 'Asset Statistics', description: 'Asset counts', mimeType: 'application/json' },
+  ],
+}));
+
 server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const { uri } = request.params;
-
   try {
     switch (uri) {
       case 'glpi://tickets/open': {
-        const tickets = await glpiClient.getTickets({ range: '0-99' });
-        const openTickets = tickets.filter((t: any) => t.status < 5);
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(openTickets, null, 2),
-          }],
-        };
+        const result = await client.search.search('Ticket', {
+          criteria: [{ field: TICKET_FIELDS.status, searchtype: 'lessthan', value: 5 }],
+          limit: 100,
+          order: 'DESC',
+          sort: TICKET_FIELDS.date_mod,
+          expandDropdowns: true,
+        });
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(result.data, null, 2) }] };
       }
-
       case 'glpi://tickets/recent': {
-        const tickets = await glpiClient.getTickets({ range: '0-19', order: 'DESC' });
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(tickets, null, 2),
-          }],
-        };
+        const tickets = await client.getTickets({ range: '0-19', order: 'DESC', expand_dropdowns: true });
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(tickets, null, 2) }] };
       }
-
       case 'glpi://problems/open': {
-        const problems = await glpiClient.getProblems({ range: '0-99' });
-        const openProblems = problems.filter((p: any) => p.status < 5);
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(openProblems, null, 2),
-          }],
-        };
+        const problems = await client.getProblems({ range: '0-99' });
+        const open = (problems as any[]).filter((p) => p.status < 5);
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(open, null, 2) }] };
       }
-
       case 'glpi://changes/pending': {
-        const changes = await glpiClient.getChanges({ range: '0-99' });
-        const pendingChanges = changes.filter((c: any) => c.status < 8);
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(pendingChanges, null, 2),
-          }],
-        };
+        const changes = await client.getChanges({ range: '0-99' });
+        const pending = (changes as any[]).filter((c) => c.status < 8);
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(pending, null, 2) }] };
       }
-
-      case 'glpi://computers': {
-        const computers = await glpiClient.getComputers({ range: '0-99', is_deleted: false });
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(computers, null, 2),
-          }],
-        };
-      }
-
-      case 'glpi://groups': {
-        const groups = await glpiClient.getGroups({ range: '0-99' });
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(groups, null, 2),
-          }],
-        };
-      }
-
-      case 'glpi://categories': {
-        const categories = await glpiClient.getCategories({ range: '0-99' });
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(categories, null, 2),
-          }],
-        };
-      }
-
-      case 'glpi://stats/tickets': {
-        const stats = await glpiClient.getTicketStats();
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(stats, null, 2),
-          }],
-        };
-      }
-
-      case 'glpi://stats/assets': {
-        const stats = await glpiClient.getAssetStats();
-        return {
-          contents: [{
-            uri,
-            mimeType: 'application/json',
-            text: JSON.stringify(stats, null, 2),
-          }],
-        };
-      }
-
+      case 'glpi://computers':
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(await client.getComputers({ range: '0-99', is_deleted: false }), null, 2) }] };
+      case 'glpi://groups':
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(await client.getGroups({ range: '0-99' }), null, 2) }] };
+      case 'glpi://categories':
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(await client.getCategories({ range: '0-99' }), null, 2) }] };
+      case 'glpi://stats/tickets':
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(await client.getTicketStats(), null, 2) }] };
+      case 'glpi://stats/assets':
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(await client.getAssetStats(), null, 2) }] };
       default:
         throw new McpError(ErrorCode.InvalidRequest, `Unknown resource: ${uri}`);
     }
@@ -2178,31 +1732,27 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   }
 });
 
-// Main function
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 async function main() {
   try {
     const config = getConfig();
-    glpiClient = new GlpiClient(config);
+    client = new GlpiClient(config);
+    await client.initSession();
+    console.error('GLPI session initialized');
 
-    // Initialize session
-    await glpiClient.initSession();
-    console.error('GLPI session initialized successfully');
-
-    // Start the server
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('MCP GLPI Server v2.0 running on stdio');
+    console.error('MCP GLPI Server v3.0 running on stdio');
 
-    // Handle shutdown
-    process.on('SIGINT', async () => {
-      await glpiClient.killSession();
+    const shutdown = async () => {
+      try { await client.killSession(); } catch {}
       process.exit(0);
-    });
-
-    process.on('SIGTERM', async () => {
-      await glpiClient.killSession();
-      process.exit(0);
-    });
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
