@@ -13,6 +13,25 @@
     the configured GLPI instance).
   - Annotations are derived from the tool name, so future tools are
     annotated automatically.
+- **Live smoke test** (`npm run smoke`, `npm run smoke -- --write`):
+  23 checks against a real instance — session, SearchOptions cache, field
+  resolution, count/search/stats, timeline, users/computers/groups/entities,
+  and an optional write cycle (create test ticket → followup → rename →
+  soft delete → verify trash). Reads credentials from env or `.env`
+  (gitignored). Validated against GLPI 11 (French locale).
+
+### Fixed
+
+- **Search off-by-one**: `search()` passed `limit` as the range end, but GLPI
+  ranges are inclusive — `limit: 5` returned 6 rows. Affected `glpi_search_v2`,
+  `glpi_search_tickets`, `glpi_count`-adjacent paths and the active-users
+  filter. Found by the live smoke test.
+- **`resolveField` failed on localized instances**: friendly-name resolution
+  only matched the translated label ("Statut" on a French GLPI), so
+  `resolveField('Ticket', 'status')` returned undefined. Resolution now tries,
+  in order: explicit uid → canonical own-table uid (`Ticket.status`) →
+  localized label → raw SQL column name, with own-table priority on column
+  collisions (e.g. `name` exists on both glpi_tickets and joined glpi_users).
 
 ## 3.1.0 — 2026-07-04
 
