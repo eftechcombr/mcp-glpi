@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.2.0 — 2026-07-04
+
+### Added
+
+- **MCP tool safety annotations** on all 84 tools (fixes #3, AgentSeal findings):
+  - `readOnlyHint: true` on every list/get/search/count/stats tool (56 tools).
+  - `destructiveHint: true` on delete/update/set/assign tools (9 tools) —
+    agents now get an explicit signal before invoking `glpi_delete_ticket`,
+    `glpi_delete_computer`, `glpi_update_*`, etc.
+  - `idempotentHint` and `openWorldHint: false` everywhere (tools only reach
+    the configured GLPI instance).
+  - Annotations are derived from the tool name, so future tools are
+    annotated automatically.
+
 ## 3.1.0 — 2026-07-04
 
 Reliability hardening after the v3.0.0 audit.
