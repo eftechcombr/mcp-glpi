@@ -1,15 +1,15 @@
 # AGENTS.md
 
 ## Dev environment tips
-- Install dependencies with `npm install` before running scaffolds.
-- Use `npm run dev` for the interactive TypeScript session that powers local experimentation.
-- Run `npm run build` to refresh the CommonJS bundle in `dist/` before shipping changes.
+- Install dependencies with `bun install` before running scaffolds.
+- Use `bun run dev` for the interactive TypeScript session that powers local experimentation.
+- Run `bun run build` to refresh the CommonJS bundle in `dist/` before shipping changes.
 - Store generated artefacts in `.context/` so reruns stay deterministic.
 
 ## Testing instructions
-- Execute `npm run test` to run the Jest suite.
-- Append `-- --watch` while iterating on a failing spec.
-- Trigger `npm run build && npm run test` before opening a PR to mimic CI.
+- Execute `bun test` to run the test suite.
+- Append `--watch` while iterating on a failing spec.
+- Trigger `bun run build && bun test` before opening a PR to mimic CI.
 - Add or update tests alongside any generator or CLI changes.
 
 ## PR instructions
