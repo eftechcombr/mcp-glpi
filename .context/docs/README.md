@@ -20,6 +20,18 @@ Welcome to the mcp-glpi knowledge base. Start with the project overview, then di
 | `README.md` | Project README with tool catalogue and configuration docs |
 | `AGENTS.md` | Agent collaboration conventions |
 
+## Detailed QA Reference
+
+| Guide | File | Audience |
+|---|---|---|
+| Getting Started | `qa/getting-started.md` | Administrators |
+| Authentication | `qa/authentication.md` | Administrators |
+| API Endpoints | `qa/api-endpoints.md` | Developers |
+| Project Structure | `qa/project-structure.md` | Developers |
+| Error Handling | `qa/error-handling.md` | Developers |
+| Caching | `qa/caching.md` | Developers |
+| Testing | `qa/testing.md` | Developers |
+
 ## Document Map
 
 | Guide | File | Audience |

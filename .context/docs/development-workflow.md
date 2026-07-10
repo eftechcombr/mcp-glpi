@@ -1,6 +1,6 @@
 ## Development Workflow
 
-This project follows a trunk-based development model with short-lived feature branches. All changes ship through a standard process: code → build → test → PR → merge.
+This project follows a trunk-based development model with short-lived feature branches. All changes ship through a standard process: code → lint → build → test → PR → merge.
 
 ## Branching & Releases
 
@@ -13,10 +13,14 @@ This project follows a trunk-based development model with short-lived feature br
 
 ```bash
 # Install dependencies
-npm install
+bun install
 
-# Run development server (ts-node)
+# Run development server (bun, no compilation step)
 npm run dev
+
+# Lint
+npm run lint
+npm run lint:fix       # auto-fix
 
 # Build for distribution (compiles to dist/)
 npm run build
@@ -27,13 +31,13 @@ npm test
 # Run tests in watch mode
 npm test -- --watch
 
-# Run smoke test (requires env vars)
+# Run smoke test (requires GLPI env vars)
 npm run smoke
 ```
 
 ## Code Review Expectations
 
-- All PRs require passing tests before merge.
+- All PRs require passing lint and tests before merge.
 - Run `npm run build && npm test` before opening a PR to mimic CI.
 - Follow Conventional Commits format: `feat(scope): message`, `fix(scope): message`, etc.
 - Cross-link new scaffolds in `.context/docs/README.md` and `.context/agents/README.md`.

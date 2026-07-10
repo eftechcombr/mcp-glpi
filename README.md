@@ -1,7 +1,8 @@
-# MCP Server for GLPI v3
+# MCP Server for GLPI v3.2
 
 A Model Context Protocol (MCP) server that exposes GLPI (IT Service
-Management) to AI assistants like Claude.
+Management) to AI assistants like Claude, Cline, and other MCP-compatible
+clients.
 
 v3 is a foundations-and-coverage overhaul on top of v2. See
 [CHANGELOG.md](./CHANGELOG.md) for the full list of changes; the rest of this
@@ -13,10 +14,10 @@ README documents what's exposed today.
   structured errors, retry on 5xx/429, configurable timeouts.
 - **OAuth2 auth**: password grant, client_credentials, or bearer token (v2
   app_token/user_token auth is **not** supported in v3).
-- **Real search**: multi-criteria with `AND` / `OR` / `AND NOT` / `OR NOT`,
-  `forcedisplay`, pagination, `fetch_all`, dedicated count probe.
-- **Dynamic field mapping**: `/listSearchOptions/{itemtype}` is cached so
-  `field_id` ↔ name translations stay valid across GLPI versions.
+- **Real search**: multi-criteria RSQL filter with `AND` / `OR` / `AND NOT` /
+  `OR NOT`, `forcedisplay`, pagination, `fetch_all`, dedicated count probe.
+- **Dynamic field mapping**: `/listSearchOptions/{itemtype}` is cached (1-hour
+  TTL) so `field_id` ↔ name translations stay valid across GLPI versions.
 - **High-level reporting**: `glpi_search_tickets` accepts friendly params,
   `glpi_tickets_stats_by` ventilates counts by status / category / technician /
   entity / month.
@@ -25,11 +26,15 @@ README documents what's exposed today.
   attachment, satisfaction, overdue (SLA) tickets.
 - **Resolved foreign keys by default**: detail views return `users_id_tech: 42`
   *and* the resolved name, so the LLM doesn't have to guess.
-- **MCP tool safety annotations**: `readOnlyHint` on list/get/search tools,
-  `destructiveHint` on delete/update/assign tools — agents get explicit signals
-  before acting.
+- **MCP tool safety annotations**: `readOnlyHint` on list/get/search/count/stats
+  tools, `destructiveHint` on delete/update/set/assign tools — agents get
+  explicit signals before acting.
 - **Runtime input validation** (zod) on ticket tools — clear `InvalidParams`
   errors instead of downstream GLPI failures.
+- **84 MCP tools**: covering tickets, problems, changes, assets (computers,
+  software, network equipment, printers, monitors, phones), knowledge base,
+  contracts, suppliers, locations, projects, users, groups, categories,
+  entities, documents, search, and statistics.
 
 ## Configuration
 
@@ -38,21 +43,21 @@ README documents what's exposed today.
 v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
 (Setup → General → OAuth2 Client) with the appropriate grant type enabled.
 
-| Env var | Required | Description |
-|---|---|---|
-| `GLPI_URL` | yes | Base URL of the GLPI instance |
-| `GLPI_AUTH_METHOD` | no | `password` (default), `client_credentials`, or `bearer` |
-| `GLPI_USERNAME` | yes* | Login (password grant) |
-| `GLPI_PASSWORD` | yes* | Password (password grant) |
-| `GLPI_CLIENT_ID` | yes* | OAuth2 client id (password / client_credentials grant) |
-| `GLPI_CLIENT_SECRET` | no | OAuth2 client secret (if required) |
-| `GLPI_ACCESS_TOKEN` | yes* | Pre-obtained bearer token (bearer auth) |
-| `GLPI_TIMEOUT_MS` | no | HTTP request timeout in ms (default `15000`) |
-| `GLPI_MAX_RETRIES` | no | Max retries on 5xx / 429 / network errors (default `2`) |
-| `GLPI_DEBUG` | no | Set to any value to log HTTP retries/re-auth to stderr |
-| `GLPI_ENTITY_ID` | no | Default entity context header |
-| `GLPI_PROFILE_ID` | no | Default profile context header |
-| `GLPI_ENTITY_RECURSIVE` | no | Entity recursion flag (`true`/`false`) |
+| Env var | Required | Default | Description |
+|---|---|---|---|---|
+| `GLPI_URL` | yes | — | Base URL of the GLPI instance (no trailing slash) |
+| `GLPI_AUTH_METHOD` | no | `password` | `password`, `client_credentials`, or `bearer` |
+| `GLPI_USERNAME` | yes* | — | Login (password grant) |
+| `GLPI_PASSWORD` | yes* | — | Password (password grant) |
+| `GLPI_CLIENT_ID` | yes* | — | OAuth2 client id (password / client_credentials grant) |
+| `GLPI_CLIENT_SECRET` | no | — | OAuth2 client secret (password / client_credentials grant) |
+| `GLPI_ACCESS_TOKEN` | yes* | — | Pre-obtained bearer token (bearer auth) |
+| `GLPI_TIMEOUT_MS` | no | `15000` | HTTP request timeout in ms |
+| `GLPI_MAX_RETRIES` | no | `2` | Max retries on 5xx / 429 / network errors |
+| `GLPI_DEBUG` | no | — | Set to any value to log HTTP retries/re-auth to stderr |
+| `GLPI_ENTITY_ID` | no | — | Default entity context header |
+| `GLPI_PROFILE_ID` | no | — | Default profile context header |
+| `GLPI_ENTITY_RECURSIVE` | no | `false` | Entity recursion flag (`true`/`false`) |
 
 \* depends on `GLPI_AUTH_METHOD` — see `.env.example` for details.
 
@@ -191,6 +196,17 @@ resolved dynamically — no longer hard-coded). Projects also support
 | 4 | High |
 | 5 | Very high |
 
+### Problem status
+
+| ID | Label |
+|---|---|
+| 1 | New |
+| 2 | Accepted |
+| 3 | Planned |
+| 4 | Pending |
+| 5 | Solved |
+| 6 | Closed |
+
 ### Change status
 
 | ID | Label |
@@ -208,23 +224,53 @@ resolved dynamically — no longer hard-coded). Projects also support
 | 11 | Refused |
 | 12 | Canceled |
 
+### Ticket type
+
+| ID | Label |
+|---|---|
+| 1 | Incident |
+| 2 | Request |
+
+### Task state (for `glpi_add_task`)
+
+| ID | Label |
+|---|---|
+| 0 | Info |
+| 1 | Todo |
+| 2 | Done |
+
+### Ticket assignment type (for `glpi_assign_ticket`)
+
+| ID | Label |
+|---|---|
+| 1 | Requester |
+| 2 | Assigned (technician) |
+| 3 | Observer |
+
 ## Development
 
 ```bash
 git clone https://github.com/eftechcombr/mcp-glpi.git
 cd mcp-glpi
 bun install
-bun run build
-bun test           # bun test
-bun run smoke      # live integration test against a real GLPI instance
+bun run build       # compile TypeScript → dist/
+bun test            # unit tests (Bun test runner)
+bun run smoke       # live integration test against a real GLPI instance
 bun run smoke --write  # smoke test + write cycle (create → followup → delete)
 ```
 
-Run locally:
+Run locally (development, runs TypeScript directly):
 
 ```bash
 cp .env.example .env   # fill in your GLPI credentials
-bun start
+bun run dev             # runs src/index.ts directly via Bun
+```
+
+Run locally (production, uses compiled dist/):
+
+```bash
+cp .env.example .env   # fill in your GLPI credentials
+bun run build && bun start
 ```
 
 The smoke test reads credentials from env or `.env` (gitignored). Validated
@@ -266,7 +312,7 @@ docker run -d --name mcp-glpi \
   mcp-glpi
 ```
 
-The container runs as a non-root user (`nodeuser:1001`) and reads all
+The container runs as a non-root user (`bunuser:1001`) and reads all
 configuration from environment variables (see [Configuration](#configuration)
 above).
 

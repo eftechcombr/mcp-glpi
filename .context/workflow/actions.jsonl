@@ -50,3 +50,9 @@
 {"timestamp":"2026-07-10T02:34:56.583Z","tool":"explore","action":"getStructure","status":"success","details":{"params":{"action":"getStructure","rootPath":"/Users/eduardo/git/github/eftechcombr/mcp-glpi","maxDepth":3},"result":{"success":true}}}
 {"timestamp":"2026-07-10T02:38:27.930Z","tool":"context","action":"check","status":"success","details":{"params":{"action":"check","repoPath":"/Users/eduardo/git/github/eftechcombr/mcp-glpi"}}}
 {"timestamp":"2026-07-10T02:39:01.902Z","tool":"agent","action":"getInfo","status":"success","details":{"params":{"action":"getInfo","agentType":"security-auditor"},"result":{"success":true}}}
+{"timestamp":"2026-07-10T03:21:16.887Z","tool":"context","action":"check","status":"success","details":{"params":{"action":"check","repoPath":"/Users/eduardo/git/github/eftechcombr/mcp-glpi"}}}
+{"timestamp":"2026-07-10T03:21:18.925Z","tool":"context","action":"listToFill","status":"success","details":{"params":{"action":"listToFill"},"result":{"success":true}}}
+{"timestamp":"2026-07-10T03:21:19.334Z","tool":"explore","action":"getStructure","status":"success","details":{"params":{"action":"getStructure","rootPath":"/Users/eduardo/git/github/eftechcombr/mcp-glpi/.context"},"result":{"success":true}}}
+{"timestamp":"2026-07-10T03:21:26.609Z","tool":"context","action":"getMap","status":"success","details":{"params":{"action":"getMap"},"result":{"success":true}}}
+{"timestamp":"2026-07-10T03:21:29.150Z","tool":"context","action":"fill","status":"success","details":{"params":{"action":"fill","target":"docs"},"result":{"success":true}}}
+{"timestamp":"2026-07-10T03:21:31.920Z","tool":"context","action":"fill","status":"success","details":{"params":{"action":"fill","target":"docs","offset":3},"result":{"success":true}}}
