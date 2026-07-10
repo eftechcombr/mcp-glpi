@@ -1,24 +1,21 @@
-/**
- * Unified HTTP layer for GLPI REST API.
- *
- * - Single `request()` entry point used by every domain call.
- * - Auto re-authentication on 401 (expired session_token).
- * - Structured errors with HTTP status, GLPI error code/message, and full body.
- * - Optional retry with exponential backoff on 5xx.
- */
+import { URLSearchParams } from 'url';
+
+export type GlpiAuthMethod = 'password' | 'client_credentials' | 'bearer';
 
 export interface GlpiHttpConfig {
   url: string;
-  appToken?: string;
-  userToken?: string;
+  authMethod?: GlpiAuthMethod;
   username?: string;
   password?: string;
-  /** Max retry attempts on 5xx (default 2). */
+  clientId?: string;
+  clientSecret?: string;
+  accessToken?: string;
   maxRetries?: number;
-  /** Initial backoff in ms (default 300). */
   retryBaseDelayMs?: number;
-  /** Request timeout in ms (default 15000). */
   timeoutMs?: number;
+  entityId?: number;
+  profileId?: number;
+  entityRecursive?: boolean;
 }
 
 export interface GlpiRawError {
@@ -54,17 +51,10 @@ export class GlpiError extends Error {
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-  /** Query parameters, appended to the URL. */
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   query?: URLSearchParams | Record<string, string | number | boolean | undefined>;
-  /** JSON body, sent as `Content-Type: application/json`. */
   json?: unknown;
-  /** Skip auto session init/reauth (used internally for initSession/killSession). */
-  noSession?: boolean;
-  /** Override auth header (used by initSession). */
-  authHeader?: string;
-  /** Capture response headers in the result. */
-  withHeaders?: boolean;
+  headers?: Record<string, string>;
 }
 
 export interface RequestResult<T> {
@@ -73,7 +63,6 @@ export interface RequestResult<T> {
   status: number;
 }
 
-/** Debug logging to stderr (stdout is reserved for the MCP stdio transport). */
 function debugLog(message: string): void {
   if (process.env.GLPI_DEBUG) {
     console.error(`[glpi-http] ${new Date().toISOString()} ${message}`);
@@ -82,7 +71,8 @@ function debugLog(message: string): void {
 
 export class GlpiHttp {
   readonly config: GlpiHttpConfig;
-  private sessionToken: string | null = null;
+  private accessToken: string | null = null;
+  private tokenExpiresAt: number = 0;
 
   constructor(config: GlpiHttpConfig) {
     this.config = {
@@ -90,55 +80,97 @@ export class GlpiHttp {
       retryBaseDelayMs: 300,
       timeoutMs: 15000,
       ...config,
-      url: config.url.replace(/\/$/, ''),
+      url: config.url.replace(/\/+$/, ''),
     };
   }
 
-  get session(): string | null {
-    return this.sessionToken;
+  get token(): string | null {
+    return this.accessToken;
   }
 
-  async initSession(): Promise<string> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.config.appToken) headers['App-Token'] = this.config.appToken;
+  async initSession(): Promise<void> {
+    const method = this.config.authMethod ?? 'password';
 
-    if (this.config.userToken) {
-      headers['Authorization'] = `user_token ${this.config.userToken}`;
-    } else if (this.config.username && this.config.password) {
-      const credentials = Buffer.from(
-        `${this.config.username}:${this.config.password}`
-      ).toString('base64');
-      headers['Authorization'] = `Basic ${credentials}`;
-    } else {
+    if (method === 'bearer') {
+      if (!this.config.accessToken) {
+        throw new Error('bearer auth requires GLPI_ACCESS_TOKEN');
+      }
+      this.accessToken = this.config.accessToken;
+      this.tokenExpiresAt = Infinity;
+      debugLog('Using pre-configured bearer token');
+      return;
+    }
+
+    if (method === 'client_credentials') {
+      if (!this.config.clientId) {
+        throw new Error('client_credentials grant requires GLPI_CLIENT_ID');
+      }
+      await this.fetchToken({
+        grant_type: 'client_credentials',
+        client_id: this.config.clientId,
+        ...(this.config.clientSecret ? { client_secret: this.config.clientSecret } : {}),
+        scope: 'api',
+      });
+      return;
+    }
+
+    // password grant
+    if (!this.config.username || !this.config.password) {
       throw new Error(
-        'No authentication method provided. Set userToken or username/password.'
+        'password grant requires GLPI_USERNAME and GLPI_PASSWORD'
       );
     }
-
-    const url = `${this.config.url}/apirest.php/initSession`;
-    const response = await this.fetchWithTimeout(url, { method: 'GET', headers });
-
-    if (!response.ok) {
-      throw await this.buildError(response, 'GET', url);
-    }
-
-    const data = (await response.json()) as { session_token: string };
-    this.sessionToken = data.session_token;
-    return this.sessionToken;
+    await this.fetchToken({
+      grant_type: 'password',
+      username: this.config.username,
+      password: this.config.password,
+      client_id: this.config.clientId,
+      ...(this.config.clientSecret ? { client_secret: this.config.clientSecret } : {}),
+      scope: 'api',
+    });
   }
 
-  async killSession(): Promise<void> {
-    if (!this.sessionToken) return;
-    try {
-      await this.request('killSession', { noSession: false });
-    } catch {
-      // ignore
+  private async fetchToken(params: Record<string, string | undefined>): Promise<void> {
+    const tokenUrl = `${this.config.url}/api.php/token`;
+    const body = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined) body.append(k, v);
     }
-    this.sessionToken = null;
+
+    const response = await this.fetchWithTimeout(tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (!response.ok) {
+      throw await this.buildError(response, 'POST', tokenUrl);
+    }
+
+    const data = (await response.json()) as {
+      access_token: string;
+      token_type: string;
+      expires_in?: number;
+      scope?: string;
+    };
+
+    this.accessToken = data.access_token;
+    this.tokenExpiresAt = data.expires_in
+      ? Date.now() + (data.expires_in * 1000) - 30000
+      : Infinity;
+
+    debugLog(`OAuth2 token obtained via ${params.grant_type}, expires in ${data.expires_in ?? 'never'}s`);
+  }
+
+  killSession(): void {
+    this.accessToken = null;
+    this.tokenExpiresAt = 0;
   }
 
   private async ensureSession(): Promise<void> {
-    if (!this.sessionToken) await this.initSession();
+    if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
+      await this.initSession();
+    }
   }
 
   private async fetchWithTimeout(
@@ -162,29 +194,36 @@ export class GlpiHttp {
     }
   }
 
-  /**
-   * Unified GLPI request.
-   * - `path` is appended to `{baseUrl}/apirest.php/`. Do NOT URL-encode upfront.
-   */
   async request<T = unknown>(
     path: string,
     options: RequestOptions = {}
   ): Promise<RequestResult<T>> {
     const method = options.method ?? 'GET';
 
-    if (!options.noSession) await this.ensureSession();
+    await this.ensureSession();
 
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${this.accessToken}`,
     };
-    if (this.config.appToken) headers['App-Token'] = this.config.appToken;
-    if (this.sessionToken && !options.authHeader) {
-      headers['Session-Token'] = this.sessionToken;
+    if (options.json !== undefined) {
+      headers['Content-Type'] = 'application/json';
     }
-    if (options.authHeader) headers['Authorization'] = options.authHeader;
+
+    if (this.config.entityId !== undefined) {
+      headers['GLPI-Entity'] = String(this.config.entityId);
+    }
+    if (this.config.profileId !== undefined) {
+      headers['GLPI-Profile'] = String(this.config.profileId);
+    }
+    if (this.config.entityRecursive !== undefined) {
+      headers['GLPI-Entity-Recursive'] = this.config.entityRecursive ? 'true' : 'false';
+    }
+    if (options.headers) {
+      Object.assign(headers, options.headers);
+    }
 
     const queryString = this.buildQuery(options.query);
-    const fullUrl = `${this.config.url}/apirest.php/${path}${queryString ? '?' + queryString : ''}`;
+    const fullUrl = `${this.config.url}/api.php/${path}${queryString ? '?' + queryString : ''}`;
 
     const init: RequestInit = { method, headers };
     if (options.json !== undefined) init.body = JSON.stringify(options.json);
@@ -200,7 +239,6 @@ export class GlpiHttp {
       try {
         response = await this.fetchWithTimeout(fullUrl, init);
       } catch (err) {
-        // Network error or timeout -> retry with backoff.
         if (attempt < maxRetries) {
           const delay = baseDelay * Math.pow(2, attempt);
           debugLog(`${method} ${path} network error (${err instanceof Error ? err.message : err}), retry in ${delay}ms`);
@@ -212,21 +250,23 @@ export class GlpiHttp {
       }
 
       if (response.ok) {
+        if (response.status === 204) {
+          return { data: undefined as unknown as T, headers: response.headers, status: response.status };
+        }
         const data = await this.parseBody<T>(response);
         return { data, headers: response.headers, status: response.status };
       }
 
-      // 401 -> session likely expired. Reauth once, retry once.
-      if (response.status === 401 && !reauthAttempted && !options.noSession) {
+      if (response.status === 401 && !reauthAttempted) {
         reauthAttempted = true;
-        this.sessionToken = null;
+        this.accessToken = null;
+        this.tokenExpiresAt = 0;
         debugLog(`${method} ${path} -> 401, re-authenticating`);
         await this.initSession();
-        if (this.sessionToken) headers['Session-Token'] = this.sessionToken;
+        headers['Authorization'] = `Bearer ${this.accessToken}`;
         continue;
       }
 
-      // 429 -> honour Retry-After header if present, else exponential backoff.
       if (response.status === 429 && attempt < maxRetries) {
         const retryAfter = Number(response.headers.get('retry-after'));
         const delay = retryAfter > 0 ? retryAfter * 1000 : baseDelay * Math.pow(2, attempt);
@@ -236,7 +276,6 @@ export class GlpiHttp {
         continue;
       }
 
-      // 5xx -> exponential backoff retry.
       if (response.status >= 500 && attempt < maxRetries) {
         const delay = baseDelay * Math.pow(2, attempt);
         debugLog(`${method} ${path} -> ${response.status}, retry in ${delay}ms`);
@@ -272,13 +311,11 @@ export class GlpiHttp {
     let glpiMessage: string | undefined;
     try {
       const parsed = JSON.parse(body);
-      // GLPI returns errors as ["ERROR_CODE", "message"]
       if (Array.isArray(parsed) && parsed.length >= 1 && typeof parsed[0] === 'string') {
         glpiCode = parsed[0];
         glpiMessage = typeof parsed[1] === 'string' ? parsed[1] : undefined;
       }
     } catch {
-      // body is not JSON; leave glpiCode/Message undefined
     }
     return new GlpiError({
       status: response.status,

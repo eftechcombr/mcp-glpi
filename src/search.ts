@@ -1,15 +1,5 @@
-/**
- * High-level search/count/fetch_all over GLPI's /search/{itemtype} endpoint.
- *
- * Features:
- *   - Multi-criteria with link operator (AND / OR / AND NOT / OR NOT).
- *   - forcedisplay (choose returned columns).
- *   - Reads totalcount + Content-Range header.
- *   - fetch_all: paginates until totalcount reached, capped by maxRows.
- *   - Optional sort + order.
- */
-
 import { GlpiHttp } from './http.js';
+import { SearchOptionsCache } from './search-options.js';
 
 export type SearchType =
   | 'contains'
@@ -26,31 +16,22 @@ export type SearchType =
 export type SearchLink = 'AND' | 'OR' | 'AND NOT' | 'OR NOT';
 
 export interface SearchCriterion {
-  field: number;
+  field: number | string;
   searchtype: SearchType;
   value: string | number | boolean;
-  /** Combination operator with the previous criterion. Ignored on the first one. */
   link?: SearchLink;
 }
 
 export interface SearchOptions {
   criteria?: SearchCriterion[];
-  /** field_id list to return; if undefined, GLPI uses its default. */
   forcedisplay?: number[];
-  /** First row (0-indexed). */
   start?: number;
-  /** Maximum rows for this single call. */
   limit?: number;
-  /** Sort by field_id (search option id). */
-  sort?: number;
+  sort?: number | string;
   order?: 'ASC' | 'DESC';
-  /** If true, paginate until totalcount is reached (or maxRows is hit). */
   fetchAll?: boolean;
-  /** Safety cap when fetchAll=true (default 1000). */
   maxRows?: number;
-  /** Pass `expand_dropdowns=true` for resolved labels. */
   expandDropdowns?: boolean;
-  /** Pass `giveItems=true` to receive raw items. */
   giveItems?: boolean;
 }
 
@@ -60,19 +41,52 @@ export interface SearchResponse<T = Record<string, unknown>> {
   count: number;
   start: number;
   data: T[];
-  /** Raw Content-Range header value, if present. */
   contentRange?: string;
 }
 
 const DEFAULT_PAGE = 100;
 const DEFAULT_MAX_ROWS = 1000;
 
-export class GlpiSearch {
-  constructor(private http: GlpiHttp) {}
+const RSQL_LINK_MAP: Record<string, string> = {
+  'AND': ';',
+  'OR': ',',
+  'AND NOT': ';',
+  'OR NOT': ',',
+};
 
-  /**
-   * Execute a search call (single page or fetch_all loop).
-   */
+const SEARCHTYPE_RSQL_MAP: Record<string, (prop: string, value: string) => string> = {
+  equals: (prop, v) => `${prop}==${v}`,
+  notequals: (prop, v) => `${prop}!=${v}`,
+  contains: (prop, v) => `${prop}==*${escapeRsqlValue(v)}*`,
+  notcontains: (prop, v) => `${prop}!=*${escapeRsqlValue(v)}*`,
+  morethan: (prop, v) => `${prop}=gt=${v}`,
+  lessthan: (prop, v) => `${prop}=lt=${v}`,
+  empty: (prop) => `${prop}==''`,
+  notempty: (prop) => `${prop}!=''`,
+  under: (prop, v) => `${prop}==${v}`,
+  notunder: (prop, v) => `${prop}!=${v}`,
+};
+
+function escapeRsqlValue(v: string): string {
+  return v.replace(/'/g, "\\'").replace(/\*/g, '\\*');
+}
+
+function formatRsqlValue(v: string | number | boolean): string {
+  if (typeof v === 'string') {
+    if (/[&\|!=<>\(\)\;\*, ]/.test(v) && !v.startsWith("'")) {
+      return `'${v.replace(/'/g, "\\'")}'`;
+    }
+    return v;
+  }
+  return String(v);
+}
+
+export class GlpiSearch {
+  constructor(
+    private http: GlpiHttp,
+    private searchOptions: SearchOptionsCache
+  ) {}
+
   async search<T = Record<string, unknown>>(
     itemtype: string,
     options: SearchOptions = {}
@@ -81,56 +95,48 @@ export class GlpiSearch {
 
     const start = options.start ?? 0;
     const limit = options.limit ?? DEFAULT_PAGE;
-    // GLPI ranges are inclusive: "0-4" returns 5 rows.
-    return this.fetchPage<T>(itemtype, options, start, start + Math.max(1, limit) - 1);
+    return this.fetchPage<T>(itemtype, options, start, limit);
   }
 
-  /**
-   * Return only totalcount for the given criteria. Cheap probe (range=0-0).
-   */
   async count(
     itemtype: string,
     criteria: SearchCriterion[] = []
   ): Promise<number> {
-    const res = await this.fetchPage(itemtype, { criteria }, 0, 0);
-    return res.totalcount;
+    const result = await this.fetchPage(itemtype, { criteria }, 0, 1);
+    return result.totalcount;
   }
 
   private async fetchPage<T>(
     itemtype: string,
     options: SearchOptions,
     start: number,
-    end: number
+    limit: number
   ): Promise<SearchResponse<T>> {
     const params = new URLSearchParams();
 
-    (options.criteria ?? []).forEach((c, i) => {
-      params.append(`criteria[${i}][field]`, String(c.field));
-      params.append(`criteria[${i}][searchtype]`, c.searchtype);
-      params.append(`criteria[${i}][value]`, String(c.value));
-      if (i > 0 && c.link) params.append(`criteria[${i}][link]`, c.link);
-    });
+    const filter = await this.buildFilter(itemtype, options.criteria ?? []);
+    if (filter) params.append('filter', filter);
 
-    (options.forcedisplay ?? []).forEach((id, i) => {
-      params.append(`forcedisplay[${i}]`, String(id));
-    });
+    params.append('start', String(start));
+    params.append('limit', String(limit));
 
-    params.append('range', `${start}-${end}`);
-    if (options.sort !== undefined) params.append('sort', String(options.sort));
-    if (options.order) params.append('order', options.order);
-    if (options.expandDropdowns) params.append('expand_dropdowns', 'true');
-    if (options.giveItems) params.append('giveItems', 'true');
+    if (options.sort !== undefined) {
+      const sortProp = await this.resolvePropertyName(itemtype, options.sort);
+      if (sortProp) {
+        params.append('sort', options.order === 'DESC' ? `${sortProp}:desc` : `${sortProp}:asc`);
+      }
+    } else if (options.order) {
+      params.append('sort', `id:${options.order.toLowerCase()}`);
+    }
 
-    const { data, headers } = await this.http.request<{
-      totalcount?: number;
-      count?: number;
-      data?: T[];
-    }>(`search/${itemtype}`, { query: params });
+    const path = this.itemtypeToPath(itemtype);
+    const { data, headers } = await this.http.request<T[]>(path, { query: params });
 
+    const items = Array.isArray(data) ? data : [];
     const contentRange = headers.get('content-range') ?? undefined;
-    let totalcount = data.totalcount ?? 0;
-    if (!totalcount && contentRange) {
-      // Format: "start-end/total"
+
+    let totalcount = 0;
+    if (contentRange) {
       const match = contentRange.match(/\/(\d+)$/);
       if (match) totalcount = parseInt(match[1], 10);
     }
@@ -138,9 +144,9 @@ export class GlpiSearch {
     return {
       itemtype,
       totalcount,
-      count: data.count ?? (data.data?.length ?? 0),
+      count: items.length,
       start,
-      data: data.data ?? [],
+      data: items as unknown as T[],
       contentRange,
     };
   }
@@ -159,9 +165,8 @@ export class GlpiSearch {
     while (collected.length < maxRows) {
       const remaining = maxRows - collected.length;
       const thisPage = Math.min(pageSize, remaining);
-      const end = cursor + thisPage - 1;
 
-      const page = await this.fetchPage<T>(itemtype, options, cursor, end);
+      const page = await this.fetchPage<T>(itemtype, options, cursor, thisPage);
       totalcount = page.totalcount;
       contentRange = page.contentRange;
 
@@ -169,6 +174,7 @@ export class GlpiSearch {
       cursor += page.data.length;
 
       if (page.data.length === 0) break;
+      if (page.data.length < thisPage) break;
       if (totalcount && cursor >= totalcount) break;
     }
 
@@ -181,4 +187,85 @@ export class GlpiSearch {
       contentRange,
     };
   }
+
+  private async buildFilter(
+    itemtype: string,
+    criteria: SearchCriterion[]
+  ): Promise<string> {
+    if (criteria.length === 0) return '';
+
+    const parts: string[] = [];
+
+    for (let i = 0; i < criteria.length; i++) {
+      const c = criteria[i];
+      const propName = await this.resolvePropertyName(itemtype, c.field);
+      if (!propName) continue;
+
+      const builder = SEARCHTYPE_RSQL_MAP[c.searchtype];
+      if (!builder) continue;
+
+      const rsql = builder(propName, formatRsqlValue(c.value));
+
+      if (i > 0 && c.link) {
+        const separator = RSQL_LINK_MAP[c.link] ?? ';';
+        if (c.link === 'AND NOT' || c.link === 'OR NOT') {
+          parts.push(`${separator}not(${rsql})`);
+        } else {
+          parts.push(`${separator}${rsql}`);
+        }
+      } else {
+        parts.push(rsql);
+      }
+    }
+
+    return parts.join('');
+  }
+
+  private async resolvePropertyName(itemtype: string, field: number | string): Promise<string | null> {
+    if (typeof field === 'string') return field;
+    return this.searchOptions.resolvePropertyName(itemtype, field);
+  }
+
+  private itemtypeToPath(itemtype: string): string {
+    return ITEMTYPE_PATH_MAP[itemtype] ?? itemtype;
+  }
 }
+
+const ITEMTYPE_PATH_MAP: Record<string, string> = {
+  Ticket: 'Assistance/Ticket',
+  Problem: 'Assistance/Problem',
+  Change: 'Assistance/Change',
+  User: 'Administration/User',
+  Group: 'Administration/Group',
+  Entity: 'Administration/Entity',
+  Computer: 'Assets/Computer',
+  Monitor: 'Assets/Monitor',
+  Printer: 'Assets/Printer',
+  Phone: 'Assets/Phone',
+  Peripheral: 'Assets/Peripheral',
+  NetworkEquipment: 'Assets/NetworkEquipment',
+  Software: 'Assets/Software',
+  SoftwareLicense: 'Assets/SoftwareLicense',
+  Certificate: 'Assets/Certificate',
+  Appliance: 'Assets/Appliance',
+  Contract: 'Management/Contract',
+  Supplier: 'Management/Supplier',
+  Document: 'Management/Document',
+  Budget: 'Management/Budget',
+  Contact: 'Management/Contact',
+  KnowbaseItem: 'Knowledgebase/Article',
+  ITILCategory: 'Dropdowns/ITILCategory',
+  Location: 'Dropdowns/Location',
+  Project: 'Project/Project',
+  ProjectTask: 'Project/Task',
+  ITILFollowup: 'ITILFollowup',
+  ITILSolution: 'ITILSolution',
+  TicketTask: 'TicketTask',
+  TicketValidation: 'TicketValidation',
+  Document_Item: 'Document_Item',
+  Ticket_Ticket: 'Ticket_Ticket',
+  Group_User: 'Group_User',
+  TicketSatisfaction: 'TicketSatisfaction',
+  Ticket_User: 'Ticket_User',
+  Group_Ticket: 'Group_Ticket',
+};

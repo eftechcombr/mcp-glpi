@@ -105,22 +105,22 @@ const VALIDATION_STATUS: Record<number, string> = {
 // Standard Ticket search-option field ids (GLPI ≥ 9.5). Fallbacks; the
 // SearchOptions cache is used to resolve friendly names dynamically.
 const TICKET_FIELDS = {
-  id: 2,
-  name: 1,
-  status: 12,
-  date: 15,
-  date_mod: 19,
-  solvedate: 17,
-  closedate: 16,
-  priority: 3,
-  urgency: 10,
-  impact: 11,
-  category: 7,
-  entity: 80,
-  requester_user: 4,
-  technician_user: 5,
-  technician_group: 8,
-  type: 14,
+  id: 'id',
+  name: 'name',
+  status: 'status',
+  date: 'date',
+  date_mod: 'date_mod',
+  solvedate: 'solvedate',
+  closedate: 'closedate',
+  priority: 'priority',
+  urgency: 'urgency',
+  impact: 'impact',
+  category: 'itilcategories_id',
+  entity: 'entities_id',
+  requester_user: '_users_id_requester',
+  technician_user: 'users_id_tech',
+  technician_group: 'groups_id_tech',
+  type: 'type',
 };
 
 // ---------------------------------------------------------------------------
@@ -144,23 +144,37 @@ function getConfig(): GlpiConfig {
     throw new Error(`GLPI_URL is not a valid URL: "${url}"`);
   }
 
-  const userToken = process.env.GLPI_USER_TOKEN;
-  const username = process.env.GLPI_USERNAME;
-  const password = process.env.GLPI_PASSWORD;
-  if (!userToken && !(username && password)) {
+  const authMethod = (process.env.GLPI_AUTH_METHOD ?? 'password') as 'password' | 'client_credentials' | 'bearer';
+
+  if (authMethod === 'password' && (!process.env.GLPI_USERNAME || !process.env.GLPI_PASSWORD)) {
     throw new Error(
-      'No authentication configured. Set GLPI_USER_TOKEN, or GLPI_USERNAME + GLPI_PASSWORD.'
+      'password grant requires GLPI_USERNAME and GLPI_PASSWORD'
+    );
+  }
+  if (authMethod === 'client_credentials' && !process.env.GLPI_CLIENT_ID) {
+    throw new Error(
+      'client_credentials grant requires GLPI_CLIENT_ID'
+    );
+  }
+  if (authMethod === 'bearer' && !process.env.GLPI_ACCESS_TOKEN) {
+    throw new Error(
+      'bearer auth requires GLPI_ACCESS_TOKEN'
     );
   }
 
   return {
     url,
-    appToken: process.env.GLPI_APP_TOKEN,
-    userToken,
-    username,
-    password,
+    authMethod,
+    username: process.env.GLPI_USERNAME,
+    password: process.env.GLPI_PASSWORD,
+    clientId: process.env.GLPI_CLIENT_ID,
+    clientSecret: process.env.GLPI_CLIENT_SECRET,
+    accessToken: process.env.GLPI_ACCESS_TOKEN,
     timeoutMs: envInt('GLPI_TIMEOUT_MS'),
     maxRetries: envInt('GLPI_MAX_RETRIES'),
+    entityId: envInt('GLPI_ENTITY_ID'),
+    profileId: envInt('GLPI_PROFILE_ID'),
+    entityRecursive: process.env.GLPI_ENTITY_RECURSIVE === 'true',
   };
 }
 
@@ -209,13 +223,17 @@ async function resolveCriteria(
   raw: CriteriaArg[]
 ): Promise<SearchCriterion[]> {
   return Promise.all(
-    raw.map(async (c) => ({
-      field: (await client.searchOptions.resolveField(itemtype, c.field)) ??
-        (typeof c.field === 'number' ? c.field : 0),
-      searchtype: c.searchtype,
-      value: c.value,
-      link: c.link,
-    }))
+    raw.map(async (c) => {
+      let field: string | number = c.field;
+      if (typeof field === 'string' && !field.includes('.')) {
+        const resolved = await client.searchOptions.resolveField(itemtype, field);
+        if (resolved !== undefined) {
+          const propName = await client.searchOptions.resolvePropertyName(itemtype, resolved);
+          if (propName) field = propName;
+        }
+      }
+      return { field, searchtype: c.searchtype, value: c.value, link: c.link };
+    })
   );
 }
 
@@ -1082,6 +1100,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'glpi_list_tickets': {
         const validated = listArgsSchema.parse(args);
         const opts = parseListArgs(validated);
+        if (opts.is_deleted === undefined) opts.is_deleted = false;
         let tickets = await client.getTickets({ ...opts, order: opts.order ?? 'DESC' });
         if (typeof validated.status === 'number') {
           tickets = tickets.filter((t: any) => t.status === validated.status);
@@ -1340,9 +1359,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
         const criteria: SearchCriterion[] = [
           { field: TICKET_FIELDS.status, searchtype: 'lessthan', value: 5 },
-          // time_to_resolve search-option id is typically 18; fall back to 18.
-          { field: 18, searchtype: 'lessthan', value: now, link: 'AND' },
-          { field: 18, searchtype: 'notempty', value: '', link: 'AND' },
+          { field: 'time_to_resolve', searchtype: 'lessthan', value: now, link: 'AND' },
+          { field: 'time_to_resolve', searchtype: 'notempty', value: '', link: 'AND' },
         ];
         if (args.entity_id !== undefined) {
           criteria.push({ field: TICKET_FIELDS.entity, searchtype: 'equals', value: args.entity_id as number, link: 'AND' });
@@ -1352,7 +1370,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit: (args.limit as number) ?? 50,
           expandDropdowns: true,
           order: 'ASC',
-          sort: 18,
+          sort: 0,
         });
         return text({
           totalcount: result.totalcount,
@@ -1626,7 +1644,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           for (const [statusId, label] of Object.entries(TICKET_STATUS)) {
             const c: SearchCriterion[] = [
               { field: TICKET_FIELDS.status, searchtype: 'equals', value: Number(statusId) },
-              ...base.map((b, i) => ({ ...b, link: 'AND' as const })),
+              ...base.map((b) => ({ ...b, link: 'AND' as const })),
             ];
             counts[label] = await client.search.count('Ticket', c);
           }
@@ -1661,7 +1679,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (n > 0) counts[e.completename ?? e.name] = n;
           }
         } else if (dimension === 'month') {
-          // Compute monthly buckets between date_from and date_to (or last 6 months).
           const to = args.date_to ? new Date(args.date_to as string) : new Date();
           const from = args.date_from ? new Date(args.date_from as string) : new Date(to.getFullYear(), to.getMonth() - 5, 1);
           const cursor = new Date(from.getFullYear(), from.getMonth(), 1);
@@ -1730,6 +1747,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const itemtype = args.itemtype as string;
         if (!itemtype) throw new McpError(ErrorCode.InvalidParams, 'itemtype required');
         const cat = await client.searchOptions.get(itemtype);
+        if (!cat) {
+          return text({ itemtype, count: 0, options: [], note: 'listSearchOptions endpoint unavailable in GLPI v2.3.0' });
+        }
         const entries = Array.from(cat.byId.values()).map((o) => ({
           id: o.id, name: o.name, uid: o.uid, table: o.table,
           field: o.field, datatype: o.datatype,
@@ -1876,7 +1896,7 @@ async function main() {
 
     const shutdown = async () => {
       try {
-        await client.killSession();
+        client.killSession();
       } catch (error) {
         console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
       }

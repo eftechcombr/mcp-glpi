@@ -34,10 +34,12 @@ if (!url) {
 
 const client = new GlpiClient({
   url,
-  appToken: process.env.GLPI_APP_TOKEN,
-  userToken: process.env.GLPI_USER_TOKEN,
+  authMethod: (process.env.GLPI_AUTH_METHOD ?? 'password') as any,
   username: process.env.GLPI_USERNAME,
   password: process.env.GLPI_PASSWORD,
+  clientId: process.env.GLPI_CLIENT_ID,
+  clientSecret: process.env.GLPI_CLIENT_SECRET,
+  accessToken: process.env.GLPI_ACCESS_TOKEN,
   timeoutMs: process.env.GLPI_TIMEOUT_MS ? parseInt(process.env.GLPI_TIMEOUT_MS, 10) : 15000,
 });
 
@@ -92,12 +94,13 @@ async function main() {
   console.log('\nSearchOptions cache:');
   await check('searchOptions.get(Ticket)', async () => {
     const cat = await client.searchOptions.get('Ticket');
+    if (!cat) return 'not available in GLPI v2.3.0';
     if (cat.byId.size < 10) throw new Error(`only ${cat.byId.size} options — suspicious`);
     return `${cat.byId.size} options`;
   });
-  await check('resolveField(Ticket, "status") = 12', async () => {
+  await check('resolveField(Ticket, "status")', async () => {
     const id = await client.searchOptions.resolveField('Ticket', 'status');
-    if (id === undefined) throw new Error('unresolved');
+    if (id === undefined) return 'not available in GLPI v2.3.0';
     return `field_id ${id}`;
   });
 
@@ -115,23 +118,20 @@ async function main() {
     return `${tickets.length} rows, latest id=${sampleTicketId ?? 'n/a'}`;
   });
 
-  await check('search Ticket (status<5, forcedisplay, limit 5)', async () => {
+  await check('search Ticket (status<5, limit 5)', async () => {
     const res = await client.search.search('Ticket', {
-      criteria: [{ field: 12, searchtype: 'lessthan', value: 5 }],
-      forcedisplay: [2, 1, 12],
+      criteria: [{ field: 'status', searchtype: 'lessthan', value: 5 }],
       limit: 5,
     });
-    if (res.data.length > 5) throw new Error(`limit 5 but got ${res.data.length} rows (range off-by-one?)`);
+    if (res.data.length > 5) throw new Error(`limit 5 but got ${res.data.length} rows`);
     return `totalcount=${res.totalcount}, page=${res.data.length}`;
   });
 
-  await check('resolveField via glpi_count path (field "status" by name)', async () => {
-    const fieldId = await client.searchOptions.resolveField('Ticket', 'status');
-    if (fieldId === undefined) throw new Error('unresolved');
+  await check('count tickets with status=New', async () => {
     const n = await client.search.count('Ticket', [
-      { field: fieldId, searchtype: 'equals', value: 1 },
+      { field: 'status', searchtype: 'equals', value: 1 },
     ]);
-    return `field_id=${fieldId}, ${n} new tickets`;
+    return `${n} new tickets`;
   });
 
   await check('getTicketStats()', async () => {
@@ -200,6 +200,17 @@ async function main() {
       await check('updateTicket (rename)', async () => {
         await client.updateTicket(testId!, { name: `[MCP-SMOKE] renamed ${Date.now()}` } as any);
       });
+      if (process.env.GLPI_SMOKE_ASSIGN_USER) {
+        await check('assignTicket (type=2 technician)', async () => {
+          const uid = parseInt(process.env.GLPI_SMOKE_ASSIGN_USER!, 10);
+          await client.assignTicket(testId!, { users_id: uid, type: 2 });
+          const t = (await client.getTicket(testId!)) as any;
+          const assigned = (t.team ?? []).some(
+            (m: any) => m.role === 'assigned' && m.id === uid
+          );
+          return `assignee=${uid} reflected=${assigned}`;
+        });
+      }
       await check('followup visible in getTicketFollowups', async () => {
         const f = (await client.getTicketFollowups(testId!)) as any[];
         if (f.length < 1) throw new Error('followup not found');
@@ -219,7 +230,7 @@ async function main() {
   // ---- teardown ----
   console.log('\nTeardown:');
   await check('killSession', async () => {
-    await client.killSession();
+    client.killSession();
   });
 
   console.log(`\n${'='.repeat(60)}`);

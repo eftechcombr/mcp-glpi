@@ -45,7 +45,7 @@ All public API symbols are listed in `codebase-map.json`. Major exports include:
 | Runtime | Node.js ≥ 18 |
 | Language | TypeScript 5.3+ |
 | Protocol | Model Context Protocol (MCP) via `@modelcontextprotocol/sdk` |
-| API | GLPI REST API (`/apirest.php/`) |
+| API | GLPI REST API (`/api.php/`) — OAuth2, tested against GLPI 11 |
 | Validation | Zod 3.22+ for input schema validation |
 | Test runner | Node `--test` via `tsx` |
 | Build | `tsc` (TypeScript compiler) |
@@ -53,7 +53,7 @@ All public API symbols are listed in `codebase-map.json`. Major exports include:
 ## Getting Started Checklist
 
 1. Clone the repo and run `npm install`.
-2. Set environment variables: `GLPI_URL`, `GLPI_APP_TOKEN`, `GLPI_USER_TOKEN` (or `GLPI_USERNAME`+`GLPI_PASSWORD`).
+2. Set environment variables: `GLPI_URL`, `GLPI_AUTH_METHOD`, and credentials per `.env.example` (OAuth2 password grant, client_credentials, or bearer).
 3. Run `npm start` to start the MCP server.
 4. Configure Claude Desktop / Claude Code to connect to the MCP server.
 5. Review [Development Workflow](./development-workflow.md) for day-to-day tasks.

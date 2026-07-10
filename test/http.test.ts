@@ -1,17 +1,5 @@
-/**
- * Integration tests for GlpiHttp using a mocked fetch.
- *
- * Run with: npm test
- *
- * These tests verify:
- *   - Session initialization with user_token
- *   - Auto re-authentication on 401
- *   - 5xx retry with exponential backoff
- *   - Structured error parsing of GLPI ["CODE", "message"] body
- */
-
 import { strict as assert } from 'node:assert';
-import { test, beforeEach, mock } from 'node:test';
+import { test, mock } from 'node:test';
 import { GlpiHttp, GlpiError } from '../src/http.js';
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>;
@@ -21,30 +9,47 @@ function installFetch(handler: FetchHandler) {
   global.fetch = mock.fn(handler);
 }
 
-beforeEach(() => {
-  // Reset between tests
-});
+function makeHttp(overrides: Record<string, unknown> = {}) {
+  return new GlpiHttp({
+    url: 'https://glpi.test',
+    username: 'testuser',
+    password: 'testpass',
+    maxRetries: 2,
+    retryBaseDelayMs: 1,
+    ...overrides,
+  } as any);
+}
 
-test('initSession with userToken stores session_token', async () => {
-  installFetch(async (url) => {
-    assert.match(url, /\/apirest\.php\/initSession$/);
-    return new Response(JSON.stringify({ session_token: 'sess-abc' }), { status: 200 });
+test('initSession with username/password obtains OAuth2 token', async () => {
+  installFetch(async (url, init) => {
+    assert.match(url, /\/api\.php\/token$/);
+    assert.equal(init?.method, 'POST');
+    const body = init?.body?.toString() ?? '';
+    assert.ok(body.includes('grant_type=password'));
+    assert.ok(body.includes('username=testuser'));
+    assert.ok(body.includes('password=testpass'));
+    return new Response(
+      JSON.stringify({ access_token: 'tok-abc', token_type: 'bearer', expires_in: 3600, scope: 'api' }),
+      { status: 200 }
+    );
   });
 
-  const http = new GlpiHttp({ url: 'https://glpi.test', userToken: 'user-123' });
-  const token = await http.initSession();
-  assert.equal(token, 'sess-abc');
-  assert.equal(http.session, 'sess-abc');
+  const http = makeHttp();
+  await http.initSession();
+  assert.equal(http.token, 'tok-abc');
 });
 
 test('request() re-authenticates on 401 and retries once', async () => {
-  let initCalls = 0;
+  let tokenCalls = 0;
   let requestCalls = 0;
 
-  installFetch(async (url) => {
-    if (url.endsWith('/initSession')) {
-      initCalls++;
-      return new Response(JSON.stringify({ session_token: `sess-${initCalls}` }), { status: 200 });
+  installFetch(async (url, _init) => {
+    if (url.endsWith('/token')) {
+      tokenCalls++;
+      return new Response(
+        JSON.stringify({ access_token: `tok-${tokenCalls}`, token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
     }
     requestCalls++;
     if (requestCalls === 1) {
@@ -53,12 +58,12 @@ test('request() re-authenticates on 401 and retries once', async () => {
     return new Response(JSON.stringify([{ id: 42, name: 'PC-01' }]), { status: 200 });
   });
 
-  const http = new GlpiHttp({ url: 'https://glpi.test', userToken: 'u' });
+  const http = makeHttp();
   await http.initSession();
 
-  const result = await http.request<{ id: number; name: string }[]>('Computer');
+  const result = await http.request<{ id: number; name: string }[]>('Assets/Computer');
   assert.equal(result.data[0].id, 42);
-  assert.equal(initCalls, 2, 'should have re-authenticated once');
+  assert.equal(tokenCalls, 2, 'should have re-authenticated once');
   assert.equal(requestCalls, 2);
 });
 
@@ -66,8 +71,11 @@ test('5xx triggers retry with backoff', async () => {
   let attempts = 0;
 
   installFetch(async (url) => {
-    if (url.endsWith('/initSession')) {
-      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
     }
     attempts++;
     if (attempts < 3) {
@@ -76,14 +84,9 @@ test('5xx triggers retry with backoff', async () => {
     return new Response(JSON.stringify([]), { status: 200 });
   });
 
-  const http = new GlpiHttp({
-    url: 'https://glpi.test',
-    userToken: 'u',
-    maxRetries: 3,
-    retryBaseDelayMs: 1,
-  });
+  const http = makeHttp({ maxRetries: 3, retryBaseDelayMs: 1 });
   await http.initSession();
-  await http.request('Computer');
+  await http.request('Assets/Computer');
   assert.equal(attempts, 3);
 });
 
@@ -91,8 +94,11 @@ test('429 is retried, honouring Retry-After', async () => {
   let attempts = 0;
 
   installFetch(async (url) => {
-    if (url.endsWith('/initSession')) {
-      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
     }
     attempts++;
     if (attempts === 1) {
@@ -104,13 +110,9 @@ test('429 is retried, honouring Retry-After', async () => {
     return new Response(JSON.stringify([]), { status: 200 });
   });
 
-  const http = new GlpiHttp({
-    url: 'https://glpi.test',
-    userToken: 'u',
-    retryBaseDelayMs: 1,
-  });
+  const http = makeHttp({ retryBaseDelayMs: 1 });
   await http.initSession();
-  await http.request('Computer');
+  await http.request('Assets/Computer');
   assert.equal(attempts, 2);
 });
 
@@ -118,31 +120,32 @@ test('network error is retried with backoff', async () => {
   let attempts = 0;
 
   installFetch(async (url) => {
-    if (url.endsWith('/initSession')) {
-      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
     }
     attempts++;
     if (attempts === 1) throw new TypeError('fetch failed: ECONNRESET');
     return new Response(JSON.stringify([{ id: 1 }]), { status: 200 });
   });
 
-  const http = new GlpiHttp({
-    url: 'https://glpi.test',
-    userToken: 'u',
-    retryBaseDelayMs: 1,
-  });
+  const http = makeHttp({ retryBaseDelayMs: 1 });
   await http.initSession();
-  const result = await http.request<{ id: number }[]>('Computer');
+  const result = await http.request<{ id: number }[]>('Assets/Computer');
   assert.equal(result.data[0].id, 1);
   assert.equal(attempts, 2);
 });
 
 test('request aborts after timeoutMs', async () => {
   installFetch(async (url, init) => {
-    if (url.endsWith('/initSession')) {
-      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
     }
-    // Simulate a hanging request that only resolves via abort signal.
     return new Promise((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => {
         const err = new Error('aborted');
@@ -152,16 +155,11 @@ test('request aborts after timeoutMs', async () => {
     });
   });
 
-  const http = new GlpiHttp({
-    url: 'https://glpi.test',
-    userToken: 'u',
-    timeoutMs: 20,
-    maxRetries: 0,
-  });
+  const http = makeHttp({ timeoutMs: 20, maxRetries: 0 });
   await http.initSession();
 
   await assert.rejects(
-    () => http.request('Computer'),
+    () => http.request('Assets/Computer'),
     (err: unknown) => {
       assert.ok(err instanceof Error);
       assert.match(err.message, /timeout after 20ms/);
@@ -172,17 +170,20 @@ test('request aborts after timeoutMs', async () => {
 
 test('error body ["CODE","message"] is parsed into GlpiError', async () => {
   installFetch(async (url) => {
-    if (url.endsWith('/initSession')) {
-      return new Response(JSON.stringify({ session_token: 's' }), { status: 200 });
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
     }
     return new Response('["ERROR_BAD_INPUT", "Missing required field"]', { status: 400 });
   });
 
-  const http = new GlpiHttp({ url: 'https://glpi.test', userToken: 'u' });
+  const http = makeHttp();
   await http.initSession();
 
   await assert.rejects(
-    () => http.request('Ticket', { method: 'POST', json: { input: {} } }),
+    () => http.request('Assistance/Ticket', { method: 'POST', json: {} }),
     (err: unknown) => {
       assert.ok(err instanceof GlpiError);
       assert.equal(err.status, 400);

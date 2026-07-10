@@ -1,26 +1,6 @@
-/**
- * GLPI REST API Client v3.0
- *
- * Thin orchestrator on top of:
- *   - GlpiHttp (unified request layer with re-auth + error structuring)
- *   - GlpiSearch (multi-criteria search, count, fetch_all)
- *   - SearchOptionsCache (/listSearchOptions/{itemtype} catalogue)
- *
- * Domain methods keep their v2 names for compatibility, but their behaviour
- * has been hardened:
- *   - All list endpoints accept `range`, `sort`, `order`, `expand_dropdowns`.
- *   - Reading endpoints default to `expand_dropdowns=true` so foreign-key IDs
- *     come back resolved (technician name, category label, entity, ...).
- *   - Bug fixes from v2 audit: is_active filter, group assignment, stats.
- */
-
 import { GlpiHttp, GlpiHttpConfig } from './http.js';
 import { GlpiSearch, SearchCriterion } from './search.js';
 import { SearchOptionsCache } from './search-options.js';
-
-// ============================================================================
-// CONFIG / INTERFACES
-// ============================================================================
 
 export interface GlpiConfig extends GlpiHttpConfig {}
 
@@ -38,7 +18,6 @@ export interface GlpiTicket {
   solvedate?: string;
   closedate?: string;
   users_id_recipient: number;
-  users_id_lastupdater: number;
   itilcategories_id: number;
   entities_id: number;
   time_to_resolve?: string;
@@ -86,12 +65,10 @@ export interface GlpiComputer {
   groups_id_tech: number;
   comment: string;
   date_mod: string;
-  operatingsystems_id: number;
   locations_id: number;
   states_id: number;
   computertypes_id: number;
   manufacturers_id: number;
-  computermodels_id: number;
   uuid: string;
   is_deleted: number;
   entities_id: number;
@@ -351,14 +328,8 @@ export interface GlpiDocument {
   entities_id: number;
 }
 
-// ============================================================================
-// LIST / GET OPTIONS
-// ============================================================================
-
 export interface ListOptions {
-  /** "START-END" range, e.g. "0-49". Default: "0-49". */
   range?: string;
-  /** Field id to sort by. */
   sort?: number;
   order?: 'ASC' | 'DESC';
   is_deleted?: boolean;
@@ -371,7 +342,6 @@ export interface ListOptions {
   with_problems?: boolean;
   with_changes?: boolean;
   with_logs?: boolean;
-  /** Free-text "searchText[field]=value" filters. */
   searchText?: Record<string, string>;
 }
 
@@ -390,9 +360,34 @@ export interface GetOptions {
   with_disks?: boolean;
 }
 
-// ============================================================================
-// CLIENT
-// ============================================================================
+const ITEMTYPE_PATH_MAP: Record<string, string> = {
+  Ticket: 'Assistance/Ticket',
+  Problem: 'Assistance/Problem',
+  Change: 'Assistance/Change',
+  User: 'Administration/User',
+  Group: 'Administration/Group',
+  Entity: 'Administration/Entity',
+  Computer: 'Assets/Computer',
+  Monitor: 'Assets/Monitor',
+  Printer: 'Assets/Printer',
+  Phone: 'Assets/Phone',
+  Peripheral: 'Assets/Peripheral',
+  NetworkEquipment: 'Assets/NetworkEquipment',
+  Software: 'Assets/Software',
+  SoftwareLicense: 'Assets/SoftwareLicense',
+  Certificate: 'Assets/Certificate',
+  Appliance: 'Assets/Appliance',
+  Contract: 'Management/Contract',
+  Supplier: 'Management/Supplier',
+  Document: 'Management/Document',
+  Budget: 'Management/Budget',
+  Contact: 'Management/Contact',
+  KnowbaseItem: 'Knowledgebase/Article',
+  ITILCategory: 'Dropdowns/ITILCategory',
+  Location: 'Dropdowns/Location',
+  Project: 'Project/Project',
+  ProjectTask: 'Project/Task',
+};
 
 export class GlpiClient {
   readonly http: GlpiHttp;
@@ -401,42 +396,34 @@ export class GlpiClient {
 
   constructor(config: GlpiConfig) {
     this.http = new GlpiHttp(config);
-    this.search = new GlpiSearch(this.http);
     this.searchOptions = new SearchOptionsCache(this.http);
+    this.search = new GlpiSearch(this.http, this.searchOptions);
   }
-
-  // ---- session ----
 
   async initSession() {
     return this.http.initSession();
   }
 
-  async killSession() {
-    return this.http.killSession();
+  killSession() {
+    this.http.killSession();
   }
 
-  // ---- generic CRUD helpers ----
+  private path(itemtype: string): string {
+    return ITEMTYPE_PATH_MAP[itemtype] ?? itemtype;
+  }
 
   private toQuery(o: ListOptions | GetOptions): Record<string, string> {
     const q: Record<string, string> = {};
-    if ('range' in o && o.range) q.range = o.range;
+    if ('range' in o && o.range) {
+      const parts = o.range.split('-');
+      q.start = parts[0] ?? '0';
+      if (parts[1]) {
+        q.limit = String(parseInt(parts[1], 10) - parseInt(parts[0] ?? '0', 10) + 1);
+      }
+    }
     if ('sort' in o && o.sort !== undefined) q.sort = String(o.sort);
     if ('order' in o && o.order) q.order = o.order;
-    if ('is_deleted' in o && o.is_deleted !== undefined) {
-      q.is_deleted = o.is_deleted ? '1' : '0';
-    }
     if (o.expand_dropdowns) q.expand_dropdowns = 'true';
-    if (o.with_networkports) q.with_networkports = 'true';
-    if (o.with_infocoms) q.with_infocoms = 'true';
-    if (o.with_contracts) q.with_contracts = 'true';
-    if (o.with_documents) q.with_documents = 'true';
-    if (o.with_tickets) q.with_tickets = 'true';
-    if (o.with_problems) q.with_problems = 'true';
-    if (o.with_changes) q.with_changes = 'true';
-    if (o.with_logs) q.with_logs = 'true';
-    if ('with_softwares' in o && o.with_softwares) q.with_softwares = 'true';
-    if ('with_connections' in o && o.with_connections) q.with_connections = 'true';
-    if ('with_disks' in o && o.with_disks) q.with_disks = 'true';
     return q;
   }
 
@@ -444,17 +431,19 @@ export class GlpiClient {
     const params = new URLSearchParams(this.toQuery(options));
     if (options.searchText) {
       for (const [k, v] of Object.entries(options.searchText)) {
-        params.append(`searchText[${k}]`, v);
+        params.append(`filter`, `${k}==${v}`);
       }
     }
-    const { data } = await this.http.request<T[]>(itemtype, { query: params });
-    return data ?? [];
+    if (options.is_deleted !== undefined) {
+      params.append('filter', `is_deleted==${options.is_deleted ? 1 : 0}`);
+    }
+    const { data } = await this.http.request<T[]>(this.path(itemtype), { query: params });
+    return Array.isArray(data) ? data : [];
   }
 
   async getItem<T>(itemtype: string, id: number, options: GetOptions = {}): Promise<T> {
-    // Default expand_dropdowns=true on detail views for human-readable output.
     const opts = { expand_dropdowns: true, ...options };
-    const { data } = await this.http.request<T>(`${itemtype}/${id}`, {
+    const { data } = await this.http.request<T>(`${this.path(itemtype)}/${id}`, {
       query: this.toQuery(opts),
     });
     return data;
@@ -464,11 +453,13 @@ export class GlpiClient {
     itemtype: string,
     payload: Record<string, unknown>
   ): Promise<{ id: number; message?: string }> {
-    const { data } = await this.http.request<{ id: number; message?: string } | Array<{ id: number; message?: string }>>(
-      itemtype,
-      { method: 'POST', json: { input: payload } }
+    const { data, headers } = await this.http.request<{ id: number } | Array<{ id: number }>>(
+      this.path(itemtype),
+      { method: 'POST', json: payload }
     );
-    return Array.isArray(data) ? data[0] : data;
+    const id = Array.isArray(data) ? data[0]?.id : data?.id;
+    const location = headers.get('location') ?? undefined;
+    return { id: id ?? 0, message: location };
   }
 
   async updateItem(
@@ -476,9 +467,9 @@ export class GlpiClient {
     id: number,
     payload: Record<string, unknown>
   ): Promise<boolean> {
-    await this.http.request(`${itemtype}/${id}`, {
-      method: 'PUT',
-      json: { input: payload },
+    await this.http.request(`${this.path(itemtype)}/${id}`, {
+      method: 'PATCH',
+      json: payload,
     });
     return true;
   }
@@ -492,11 +483,13 @@ export class GlpiClient {
     const params = new URLSearchParams();
     if (force) params.append('force_purge', '1');
     if (!history) params.append('history', '0');
-    await this.http.request(`${itemtype}/${id}`, { method: 'DELETE', query: params });
+    const query = params.toString() ? params : undefined;
+    await this.http.request(`${this.path(itemtype)}/${id}`, {
+      method: 'DELETE',
+      query,
+    });
     return true;
   }
-
-  // ---- TICKETS ----
 
   async getTickets(options: ListOptions = {}) {
     return this.getItems<GlpiTicket>('Ticket', options);
@@ -537,21 +530,19 @@ export class GlpiClient {
     content: string,
     isPrivate: boolean = false
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'ITILFollowup',
+    const { data, headers } = await this.http.request<{ id: number } | Array<{ id: number }>>(
+      `Assistance/Ticket/${ticketId}/Timeline/Followup`,
       {
         method: 'POST',
         json: {
-          input: {
-            itemtype: 'Ticket',
-            items_id: ticketId,
-            content,
-            is_private: isPrivate ? 1 : 0,
-          },
+          content,
+          is_private: isPrivate ? 1 : 0,
         },
       }
     );
-    return Array.isArray(data) ? data[0] : data;
+    const id = Array.isArray(data) ? data[0]?.id : data?.id;
+    const location = headers.get('location');
+    return { id: id ?? 0, ...(location ? { href: location } : {}) };
   }
 
   async addTicketTask(
@@ -567,26 +558,25 @@ export class GlpiClient {
       end?: string;
     } = {}
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'TicketTask',
+    const { data, headers } = await this.http.request<{ id: number } | Array<{ id: number }>>(
+      `Assistance/Ticket/${ticketId}/Timeline/Task`,
       {
         method: 'POST',
         json: {
-          input: {
-            tickets_id: ticketId,
-            content,
-            is_private: options.is_private ? 1 : 0,
-            actiontime: options.actiontime ?? 0,
-            state: options.state ?? 1,
-            users_id_tech: options.users_id_tech,
-            groups_id_tech: options.groups_id_tech,
-            begin: options.begin,
-            end: options.end,
-          },
+          tickets_id: ticketId,
+          content,
+          is_private: options.is_private ? 1 : 0,
+          actiontime: options.actiontime ?? 0,
+          state: options.state ?? 1,
+          users_id_tech: options.users_id_tech,
+          groups_id_tech: options.groups_id_tech,
+          begin: options.begin,
+          end: options.end,
         },
       }
     );
-    return Array.isArray(data) ? data[0] : data;
+    const id = Array.isArray(data) ? data[0]?.id : data?.id;
+    return { id: id ?? 0 };
   }
 
   async addTicketSolution(
@@ -594,90 +584,90 @@ export class GlpiClient {
     content: string,
     solutiontypes_id?: number
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'ITILSolution',
+    const { data, headers } = await this.http.request<{ id: number } | Array<{ id: number }>>(
+      `Assistance/Ticket/${ticketId}/Timeline/Solution`,
       {
         method: 'POST',
         json: {
-          input: {
-            itemtype: 'Ticket',
-            items_id: ticketId,
-            content,
-            solutiontypes_id: solutiontypes_id ?? 0,
-          },
+          content,
+          solutiontypes_id: solutiontypes_id ?? 0,
         },
       }
     );
-    return Array.isArray(data) ? data[0] : data;
+    const id = Array.isArray(data) ? data[0]?.id : data?.id;
+    return { id: id ?? 0 };
   }
 
   async getTicketFollowups(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/ITILFollowup`);
-    return data ?? [];
+    const { data } = await this.http.request<unknown[]>(
+      `Assistance/Ticket/${ticketId}/Timeline/Followup`
+    );
+    return Array.isArray(data) ? data : [];
   }
 
   async getTicketTasks(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/TicketTask`);
-    return data ?? [];
+    const { data } = await this.http.request<unknown[]>(
+      `Assistance/Ticket/${ticketId}/Timeline/Task`
+    );
+    return Array.isArray(data) ? data : [];
   }
 
   async getTicketSolutions(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/ITILSolution`);
-    return data ?? [];
+    const { data } = await this.http.request<unknown[]>(
+      `Assistance/Ticket/${ticketId}/Timeline/Solution`
+    );
+    return Array.isArray(data) ? data : [];
   }
 
   async getTicketValidations(ticketId: number) {
     const { data } = await this.http.request<unknown[]>(
-      `Ticket/${ticketId}/TicketValidation`
+      `Assistance/Ticket/${ticketId}/Timeline/Validation`
     );
-    return data ?? [];
+    return Array.isArray(data) ? data : [];
   }
 
   async getTicketDocuments(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(`Ticket/${ticketId}/Document_Item`);
-    return data ?? [];
+    const { data } = await this.http.request<unknown[]>(
+      `Assistance/Ticket/${ticketId}/Timeline/Document`
+    );
+    return Array.isArray(data) ? data : [];
   }
 
-  /**
-   * Assign ticket to user OR group. F12 fix: groups_id was silently dropped in v2.
-   */
   async assignTicket(
     ticketId: number,
     options: {
       users_id?: number;
       groups_id?: number;
-      /** 1=requester, 2=assigned, 3=observer */
       type?: number;
     }
-  ): Promise<{ id: number }> {
+  ): Promise<{ id: number; response?: Record<string, unknown> }> {
     if (!options.users_id && !options.groups_id) {
       throw new Error('assignTicket requires users_id or groups_id');
     }
 
     const type = options.type ?? 2;
 
-    if (options.users_id) {
-      const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-        'Ticket_User',
-        {
-          method: 'POST',
-          json: { input: { tickets_id: ticketId, users_id: options.users_id, type } },
-        }
-      );
-      return Array.isArray(data) ? data[0] : data;
+    const payload: Record<string, unknown> = {};
+    if (type === 2) {
+      payload._itil_assign = options.users_id
+        ? [{ itemtype: 'User', items_id: options.users_id }]
+        : [{ itemtype: 'Group', items_id: options.groups_id }];
+    } else if (type === 1) {
+      payload._itil_requester = options.users_id
+        ? [{ itemtype: 'User', items_id: options.users_id }]
+        : [{ itemtype: 'Group', items_id: options.groups_id }];
+    } else if (type === 3) {
+      payload._itil_observer = options.users_id
+        ? [{ itemtype: 'User', items_id: options.users_id }]
+        : [{ itemtype: 'Group', items_id: options.groups_id }];
     }
 
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'Group_Ticket',
-      {
-        method: 'POST',
-        json: { input: { tickets_id: ticketId, groups_id: options.groups_id, type } },
-      }
-    );
-    return Array.isArray(data) ? data[0] : data;
+    await this.http.request(`Assistance/Ticket/${ticketId}`, {
+      method: 'PATCH',
+      json: payload,
+    });
+    return { id: ticketId };
   }
-
-  // ---- PROBLEMS ----
 
   async getProblems(options: ListOptions = {}) {
     return this.getItems<GlpiProblem>('Problem', options);
@@ -700,8 +690,6 @@ export class GlpiClient {
     return this.updateItem('Problem', id, updates);
   }
 
-  // ---- CHANGES ----
-
   async getChanges(options: ListOptions = {}) {
     return this.getItems<GlpiChange>('Change', options);
   }
@@ -723,21 +711,14 @@ export class GlpiClient {
     return this.updateItem('Change', id, updates);
   }
 
-  // ---- USERS ----
-
-  /**
-   * F10 fix: filter active users via the /search endpoint (criteria field=8, equals)
-   * rather than searchText, which was doing a LIKE on the wrong column.
-   */
   async getUsers(options: ListOptions & { is_active?: boolean } = {}) {
     if (options.is_active === undefined) {
       return this.getItems<GlpiUser>('User', options);
     }
-    // Use search to apply a proper equals filter on is_active.
     const result = await this.search.search<GlpiUser>('User', {
       criteria: [
         {
-          field: 8, // standard "is_active" search option id for User
+          field: 8,
           searchtype: 'equals',
           value: options.is_active ? 1 : 0,
         },
@@ -758,8 +739,10 @@ export class GlpiClient {
   }
 
   async getUserByName(name: string): Promise<GlpiUser | null> {
-    const users = await this.getItems<GlpiUser>('User', { searchText: { name } });
-    return users.length > 0 ? users[0] : null;
+    const { data } = await this.http.request<GlpiUser>(
+      `Administration/User/username/${encodeURIComponent(name)}`
+    );
+    return data ?? null;
   }
 
   async createUser(user: {
@@ -780,8 +763,6 @@ export class GlpiClient {
   async updateUser(id: number, updates: Partial<GlpiUser>) {
     return this.updateItem('User', id, updates);
   }
-
-  // ---- GROUPS ----
 
   async getGroups(options: ListOptions = {}) {
     return this.getItems<GlpiGroup>('Group', options);
@@ -806,22 +787,17 @@ export class GlpiClient {
     isManager: boolean = false
   ): Promise<{ id: number }> {
     const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'Group_User',
+      `Administration/Group/${groupId}/User`,
       {
         method: 'POST',
         json: {
-          input: {
-            users_id: userId,
-            groups_id: groupId,
-            is_manager: isManager ? 1 : 0,
-          },
+          users_id: userId,
+          is_manager: isManager ? 1 : 0,
         },
       }
     );
-    return Array.isArray(data) ? data[0] : data;
+    return { id: (Array.isArray(data) ? data[0]?.id : data?.id) ?? 0 };
   }
-
-  // ---- COMPUTERS ----
 
   async getComputers(options: ListOptions = {}) {
     return this.getItems<GlpiComputer>('Computer', options);
@@ -839,8 +815,6 @@ export class GlpiClient {
     return this.deleteItem('Computer', id, force);
   }
 
-  // ---- SOFTWARE ----
-
   async getSoftwares(options: ListOptions = {}) {
     return this.getItems<GlpiSoftware>('Software', options);
   }
@@ -857,8 +831,6 @@ export class GlpiClient {
     return this.deleteItem('Software', id, force);
   }
 
-  // ---- NETWORK EQUIPMENT ----
-
   async getNetworkEquipments(options: ListOptions = {}) {
     return this.getItems<GlpiNetworkEquipment>('NetworkEquipment', options);
   }
@@ -874,8 +846,6 @@ export class GlpiClient {
   async deleteNetworkEquipment(id: number, force: boolean = false) {
     return this.deleteItem('NetworkEquipment', id, force);
   }
-
-  // ---- PRINTERS / MONITORS / PHONES ----
 
   async getPrinters(options: ListOptions = {}) {
     return this.getItems<GlpiPrinter>('Printer', options);
@@ -919,8 +889,6 @@ export class GlpiClient {
     return this.deleteItem('Phone', id, force);
   }
 
-  // ---- KNOWLEDGE BASE ----
-
   async getKnowbaseItems(options: ListOptions = {}) {
     return this.getItems<GlpiKnowbaseItem>('KnowbaseItem', options);
   }
@@ -936,12 +904,8 @@ export class GlpiClient {
     return this.createItem('KnowbaseItem', item);
   }
 
-  /**
-   * Robust KB search: resolves the "name" field id via SearchOptions instead of
-   * hardcoding `6` (which varies across GLPI versions).
-   */
   async searchKnowbase(query: string, limit: number = 50): Promise<GlpiKnowbaseItem[]> {
-    const fieldId = (await this.searchOptions.resolveField('KnowbaseItem', 'name')) ?? 6;
+    const fieldId = (await this.searchOptions.resolveField('KnowbaseItem', 'name')) ?? 'name';
     const result = await this.search.search<GlpiKnowbaseItem>('KnowbaseItem', {
       criteria: [{ field: fieldId, searchtype: 'contains', value: query }],
       limit,
@@ -949,8 +913,6 @@ export class GlpiClient {
     });
     return result.data;
   }
-
-  // ---- CONTRACTS / SUPPLIERS / LOCATIONS / ENTITIES / PROJECTS / DOCUMENTS / CATEGORIES ----
 
   async getContracts(options: ListOptions = {}) { return this.getItems<GlpiContract>('Contract', options); }
   async getContract(id: number, options: GetOptions = {}) { return this.getItem<GlpiContract>('Contract', id, options); }
@@ -977,8 +939,6 @@ export class GlpiClient {
 
   async getCategories(options: ListOptions = {}) { return this.getItems<GlpiCategory>('ITILCategory', options); }
 
-  // ---- VALIDATIONS ----
-
   async addTicketValidation(
     ticketId: number,
     options: {
@@ -987,101 +947,89 @@ export class GlpiClient {
       submission_date?: string;
     }
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'TicketValidation',
+    const { data, headers } = await this.http.request<{ id: number } | Array<{ id: number }>>(
+      `Assistance/Ticket/${ticketId}/Timeline/Validation`,
       {
         method: 'POST',
         json: {
-          input: {
-            tickets_id: ticketId,
-            users_id_validate: options.users_id_validate,
-            comment_submission: options.comment_submission ?? '',
-            submission_date:
-              options.submission_date ?? new Date().toISOString().slice(0, 19).replace('T', ' '),
-            status: 1, // 1=Waiting
-          },
+          users_id_validate: options.users_id_validate,
+          comment_submission: options.comment_submission ?? '',
+          submission_date:
+            options.submission_date ?? new Date().toISOString().slice(0, 19).replace('T', ' '),
+          status: 1,
         },
       }
     );
-    return Array.isArray(data) ? data[0] : data;
+    const id = Array.isArray(data) ? data[0]?.id : data?.id;
+    return { id: id ?? 0 };
   }
 
-  /** Approve or refuse a validation. status: 2=granted, 3=refused */
   async setTicketValidationStatus(
     validationId: number,
     status: 2 | 3,
     comment_validation?: string
   ): Promise<boolean> {
     await this.http.request(`TicketValidation/${validationId}`, {
-      method: 'PUT',
+      method: 'PATCH',
       json: {
-        input: {
-          id: validationId,
-          status,
-          comment_validation: comment_validation ?? '',
-          validation_date: new Date().toISOString().slice(0, 19).replace('T', ' '),
-        },
+        id: validationId,
+        status,
+        comment_validation: comment_validation ?? '',
+        validation_date: new Date().toISOString().slice(0, 19).replace('T', ' '),
       },
     });
     return true;
   }
 
-  // ---- DOCUMENT ATTACHMENT ----
-
-  /**
-   * Attach an existing document (by id) to a ticket via Document_Item.
-   * Use this after uploading the file via /Document.
-   */
   async attachDocumentToTicket(
     ticketId: number,
     documentId: number
   ): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'Document_Item',
+    const { data, headers } = await this.http.request<{ id: number } | Array<{ id: number }>>(
+      `Assistance/Ticket/${ticketId}/Timeline/Document`,
       {
         method: 'POST',
         json: {
-          input: {
-            documents_id: documentId,
-            itemtype: 'Ticket',
-            items_id: ticketId,
-          },
+          documents_id: documentId,
         },
       }
     );
-    return Array.isArray(data) ? data[0] : data;
+    const id = Array.isArray(data) ? data[0]?.id : data?.id;
+    return { id: id ?? 0 };
   }
-
-  // ---- SATISFACTION ----
 
   async getTicketSatisfaction(ticketId: number) {
-    const { data } = await this.http.request<unknown[]>(
-      `Ticket/${ticketId}/TicketSatisfaction`
-    );
-    return data ?? [];
+    try {
+      const { data } = await this.http.request<Record<string, unknown>>(
+        `Assistance/Ticket/${ticketId}`
+      );
+      const satisfaction = (data as any)?.satisfaction
+        ?? (data as any)?.ticketsatisfactions
+        ?? (data as any)?.TicketSatisfaction;
+      if (satisfaction) return satisfaction;
+      return { ticket_id: ticketId, satisfaction: null, note: 'satisfaction data not available in ticket response' };
+    } catch {
+      return null;
+    }
   }
 
-  // ---- LINKS ----
-
-  /** Link two tickets. linkType: 1=link, 2=duplicate, 3=parent (link), 4=son (linked) */
   async linkTickets(parentId: number, childId: number, linkType: number = 1): Promise<{ id: number }> {
-    const { data } = await this.http.request<{ id: number } | Array<{ id: number }>>(
-      'Ticket_Ticket',
+    await this.http.request<{ id: number } | Array<{ id: number }>>(
+      `Assistance/Ticket/${parentId}`,
       {
-        method: 'POST',
+        method: 'PATCH',
         json: {
-          input: {
-            tickets_id_1: parentId,
-            tickets_id_2: childId,
-            link: linkType,
-          },
+          _linked_tickets: [
+            {
+              tickets_id_2: childId,
+              link: linkType,
+            },
+          ],
         },
       }
     );
-    return Array.isArray(data) ? data[0] : data;
+    return { id: parentId };
   }
-
-  // ---- STATISTICS (F9 fix: use count probes instead of fetching all then filtering) ----
 
   async getTicketStats(filters: {
     entity_id?: number;
@@ -1097,13 +1045,13 @@ export class GlpiClient {
   }> {
     const baseCriteria: SearchCriterion[] = [];
     if (filters.entity_id !== undefined) {
-      baseCriteria.push({ field: 80, searchtype: 'equals', value: filters.entity_id, link: 'AND' });
+      baseCriteria.push({ field: 'entities_id', searchtype: 'equals', value: filters.entity_id, link: 'AND' });
     }
     if (filters.date_from) {
-      baseCriteria.push({ field: 15, searchtype: 'morethan', value: filters.date_from, link: 'AND' });
+      baseCriteria.push({ field: 'date', searchtype: 'morethan', value: filters.date_from, link: 'AND' });
     }
     if (filters.date_to) {
-      baseCriteria.push({ field: 15, searchtype: 'lessthan', value: filters.date_to, link: 'AND' });
+      baseCriteria.push({ field: 'date', searchtype: 'lessthan', value: filters.date_to, link: 'AND' });
     }
 
     const counts: Record<string, number> = {};
@@ -1116,16 +1064,13 @@ export class GlpiClient {
       closed: 6,
     })) {
       const criteria: SearchCriterion[] = [
-        { field: 12, searchtype: 'equals', value: statusId },
-        ...baseCriteria.map((c, i) => ({ ...c, link: i === 0 ? 'AND' as const : c.link })),
+        { field: 'status', searchtype: 'equals', value: statusId },
+        ...baseCriteria.map((c) => ({ ...c, link: 'AND' as const })),
       ];
       counts[label] = await this.search.count('Ticket', criteria);
     }
 
-    const total = await this.search.count(
-      'Ticket',
-      baseCriteria.length > 0 ? baseCriteria : []
-    );
+    const total = await this.search.count('Ticket', baseCriteria);
 
     return {
       total,
@@ -1157,22 +1102,20 @@ export class GlpiClient {
     return { computers, monitors, printers, networkEquipments, phones, softwares };
   }
 
-  // ---- SESSION INFO ----
-
   async getMyProfiles() {
-    const { data } = await this.http.request<unknown[]>('getMyProfiles');
-    return data ?? [];
+    const { data } = await this.http.request<unknown>('session');
+    return (data as any)?.profiles ?? [];
   }
   async getActiveProfile() {
-    const { data } = await this.http.request<unknown>('getActiveProfile');
-    return data;
+    const { data } = await this.http.request<unknown>('session');
+    return (data as any)?.active_profile ?? data;
   }
   async getMyEntities() {
-    const { data } = await this.http.request<unknown[]>('getMyEntities');
-    return data ?? [];
+    const { data } = await this.http.request<unknown>('Session/EntityTree');
+    return Array.isArray(data) ? data : [];
   }
   async getFullSession() {
-    const { data } = await this.http.request<unknown>('getFullSession');
+    const { data } = await this.http.request<unknown>('session');
     return data;
   }
 }

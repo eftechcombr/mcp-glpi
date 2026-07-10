@@ -1,0 +1,14 @@
+{
+  "active": [
+    {
+      "slug": "mcp-glpi-v230-api-migration",
+      "path": "plans/mcp-glpi-v230-api-migration.md",
+      "title": "mcp-glpi v2.3.0 API Migration",
+      "summary": "Rewrite the HTTP, search, and client layers of mcp-glpi to connect to GLPI's new api.php v2.3.0 REST API. All existing MCP tools preserved (0 new, 0 removed).",
+      "linkedAt": "2026-07-10T00:37:28.558Z",
+      "status": "active"
+    }
+  ],
+  "completed": [],
+  "primary": "mcp-glpi-v230-api-migration"
+}

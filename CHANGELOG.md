@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.2.1 — 2026-07-09
+
+### Fixed
+
+- **GLPI 11 compatibility — OAuth2 scopes**: token requests now send
+  `scope=api`, which GLPI 11 requires to populate the JWT with API scopes.
+  Without this, the bearer token is issued with `"scopes":[]` and every API
+  call returns 401 / 403.
+- **GLPI 11 compatibility — `Content-Type` on GET requests**: the HTTP layer
+  no longer sets `Content-Type: application/json` on requests without a body.
+  GLPI 11 rejects GET requests that carry this header with no body.
+- **GLPI 11 compatibility — RSQL search operators**: `glpi_search_v2` and
+  related search tools now use standard RSQL `=lt=` and `=gt=` operators
+  instead of raw `<` / `>`. GLPI 11 parses the query via an RSQL parser that
+  requires the `=lt=` form.
+
 ## 3.2.0 — 2026-07-04
 
 ### Added

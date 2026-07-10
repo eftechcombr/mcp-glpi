@@ -10,7 +10,9 @@ README documents what's exposed today.
 ## What's in v3
 
 - **Solid foundations**: unified HTTP layer with auto re-authentication on 401,
-  structured errors, retry on 5xx.
+  structured errors, retry on 5xx/429, configurable timeouts.
+- **OAuth2 auth**: password grant, client_credentials, or bearer token (v2
+  app_token/user_token auth is **not** supported in v3).
 - **Real search**: multi-criteria with `AND` / `OR` / `AND NOT` / `OR NOT`,
   `forcedisplay`, pagination, `fetch_all`, dedicated count probe.
 - **Dynamic field mapping**: `/listSearchOptions/{itemtype}` is cached so
@@ -23,21 +25,36 @@ README documents what's exposed today.
   attachment, satisfaction, overdue (SLA) tickets.
 - **Resolved foreign keys by default**: detail views return `users_id_tech: 42`
   *and* the resolved name, so the LLM doesn't have to guess.
+- **MCP tool safety annotations**: `readOnlyHint` on list/get/search tools,
+  `destructiveHint` on delete/update/assign tools — agents get explicit signals
+  before acting.
+- **Runtime input validation** (zod) on ticket tools — clear `InvalidParams`
+  errors instead of downstream GLPI failures.
 
 ## Configuration
+
+### Auth method
+
+v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
+(Setup → General → OAuth2 Client) with the appropriate grant type enabled.
 
 | Env var | Required | Description |
 |---|---|---|
 | `GLPI_URL` | yes | Base URL of the GLPI instance |
-| `GLPI_APP_TOKEN` | no | Application token (Setup → General → API) |
-| `GLPI_USER_TOKEN` | no\* | User API token |
-| `GLPI_USERNAME` | no\* | Login (when not using user token) |
-| `GLPI_PASSWORD` | no\* | Password (when not using user token) |
+| `GLPI_AUTH_METHOD` | no | `password` (default), `client_credentials`, or `bearer` |
+| `GLPI_USERNAME` | yes* | Login (password grant) |
+| `GLPI_PASSWORD` | yes* | Password (password grant) |
+| `GLPI_CLIENT_ID` | yes* | OAuth2 client id (password / client_credentials grant) |
+| `GLPI_CLIENT_SECRET` | no | OAuth2 client secret (if required) |
+| `GLPI_ACCESS_TOKEN` | yes* | Pre-obtained bearer token (bearer auth) |
 | `GLPI_TIMEOUT_MS` | no | HTTP request timeout in ms (default `15000`) |
 | `GLPI_MAX_RETRIES` | no | Max retries on 5xx / 429 / network errors (default `2`) |
 | `GLPI_DEBUG` | no | Set to any value to log HTTP retries/re-auth to stderr |
+| `GLPI_ENTITY_ID` | no | Default entity context header |
+| `GLPI_PROFILE_ID` | no | Default profile context header |
+| `GLPI_ENTITY_RECURSIVE` | no | Entity recursion flag (`true`/`false`) |
 
-\* either `GLPI_USER_TOKEN` or `GLPI_USERNAME`+`GLPI_PASSWORD` is required.
+\* depends on `GLPI_AUTH_METHOD` — see `.env.example` for details.
 
 ### Claude Desktop / Claude Code
 
@@ -49,8 +66,10 @@ README documents what's exposed today.
       "args": ["mcp-glpi"],
       "env": {
         "GLPI_URL": "https://glpi.example.com",
-        "GLPI_APP_TOKEN": "...",
-        "GLPI_USER_TOKEN": "..."
+        "GLPI_AUTH_METHOD": "password",
+        "GLPI_USERNAME": "your_username",
+        "GLPI_PASSWORD": "your_password",
+        "GLPI_CLIENT_ID": "your_client_id"
       }
     }
   }
@@ -102,19 +121,20 @@ README documents what's exposed today.
 
 | Tool family | Notes |
 |---|---|
-| Computer, Software, NetworkEquipment, Printer, Monitor, Phone | `list_*`, `get_*`, plus `create`/`update`/`delete` symmetry |
+| Computer, Software, NetworkEquipment, Printer, Monitor, Phone | `list_*`, `get_*` (with `with_softwares`/`with_networkports`/`with_connections`/`with_documents`), plus `create`/`update`/`delete` symmetry |
 
 ### Knowledge base, contracts, suppliers, locations, projects, documents
 
 `glpi_list_*`, `glpi_get_*`, and `glpi_create_*` where the GLPI API allows it.
 `glpi_search_knowbase` performs a free-text search on the title (field id
-resolved dynamically — no longer hard-coded).
+resolved dynamically — no longer hard-coded). Projects also support
+`glpi_update_project`.
 
 ### Users, groups, categories, entities
 
 `glpi_list_users` filters active users via the search endpoint (not
-`searchText`); `glpi_create_user`/`glpi_create_group`/`glpi_add_user_to_group`
-cover provisioning.
+`searchText`); `glpi_search_user` searches by login name; `glpi_create_user`/
+`glpi_create_group`/`glpi_add_user_to_group` cover provisioning.
 
 ### Statistics
 
@@ -195,16 +215,264 @@ git clone https://github.com/eftechcombr/mcp-glpi.git
 cd mcp-glpi
 npm install
 npm run build
-npm test          # node --test via tsx, mocked fetch
+npm test            # tsx --test test/*.test.ts
+npm run smoke       # live integration test against a real GLPI instance
+npm run smoke -- --write  # smoke test + write cycle (create → followup → delete)
 ```
 
 Run locally:
 
 ```bash
-export GLPI_URL="https://glpi.example.com"
-export GLPI_USER_TOKEN="..."
+cp .env.example .env   # fill in your GLPI credentials
 npm start
 ```
+
+The smoke test reads credentials from env or `.env` (gitignored). Validated
+against GLPI 11 (French locale).
+
+## Docker
+
+The Docker image packages the MCP server with all dependencies, so you can run
+it anywhere Docker is installed — no Node.js or npm required on the host.
+
+### Prerequisites
+
+- Docker Engine 20+ or Docker Desktop
+- A GLPI instance and OAuth2 credentials (see [Configuration](#configuration))
+
+### Quick start with Docker Compose
+
+```bash
+# 1. Copy and fill in your GLPI credentials
+cp .env.example .env
+
+# 2. Build the image
+docker compose build
+
+# 3. Start the server (detached)
+docker compose up -d
+```
+
+### Quick start with Docker directly
+
+```bash
+# 1. Build the image
+docker build -t mcp-glpi .
+
+# 2. Run the container with your .env file
+docker run -d --name mcp-glpi \
+  --restart unless-stopped \
+  --env-file .env \
+  mcp-glpi
+```
+
+The container runs as a non-root user (`nodeuser:1001`) and reads all
+configuration from environment variables (see [Configuration](#configuration)
+above).
+
+### Understanding MCP transport and Docker
+
+This server uses **MCP stdio transport** — it reads JSON-RPC messages from
+stdin and writes responses to stdout. When running in Docker for direct testing
+(without an MCP client), the `-d` (detached) flag is fine because no one is
+writing to stdin.
+
+However, when an MCP client like **Claude Desktop** or **VS Code** launches the
+server, **the client itself manages the container as a subprocess**. The client
+runs `docker run -i --rm ...` and communicates via stdin/stdout. The `-i`
+(interactive) flag keeps stdin open for the MCP protocol. The `-t` (TTY) flag
+**must not** be used as it can corrupt the binary protocol stream.
+
+### Configuring MCP clients to use the Docker server
+
+#### Claude Desktop / Claude Code
+
+Add the following entry to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "glpi": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--name", "mcp-glpi",
+        "-e", "GLPI_URL=https://glpi.example.com",
+        "-e", "GLPI_AUTH_METHOD=password",
+        "-e", "GLPI_USERNAME=your_username",
+        "-e", "GLPI_PASSWORD=your_password",
+        "-e", "GLPI_CLIENT_ID=your_client_id",
+        "mcp-glpi"
+      ]
+    }
+  }
+}
+```
+
+**Key points about the configuration:**
+
+| Flag / Setting | Reason |
+|---|---|
+| `-i` | Keeps stdin open — **required** for MCP stdio transport |
+| `--rm` | Removes the container after Claude Desktop stops |
+| `--name` | Optional; lets you reference the container in logs |
+| No `-t` | Never combine with `-t` (TTY) — it corrupts the protocol |
+
+#### Using `--env-file` instead of inline `-e`
+
+For many environment variables, use a file-based approach for clarity:
+
+```json
+{
+  "mcpServers": {
+    "glpi": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "--env-file", "/absolute/path/to/.env",
+        "mcp-glpi"
+      ]
+    }
+  }
+}
+```
+
+> ⚠️ **Note:** `--env-file` requires the **absolute path** to your `.env` file.
+> Relative paths are resolved relative to the Docker daemon, not the config file.
+
+#### VS Code (Cline / Continue extensions)
+
+Extensions that support MCP servers accept the same `command`/`args` pattern.
+Configure the Docker container as the server process:
+
+```json
+{
+  "mcpServers": {
+    "glpi": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "GLPI_URL=https://glpi.example.com",
+        "-e", "GLPI_AUTH_METHOD=password",
+        "-e", "GLPI_USERNAME=your_username",
+        "-e", "GLPI_PASSWORD=your_password",
+        "-e", "GLPI_CLIENT_ID=your_client_id",
+        "mcp-glpi"
+      ]
+    }
+  }
+}
+```
+
+### Environment variables
+
+All configuration is passed via environment variables — no config files are
+needed inside the container. See the [Configuration](#configuration) section
+above for the complete list of supported variables, their defaults, and which
+ones are required for each auth method.
+
+### Using a remote / pre-built image
+
+You can pull a pre-built image from a registry instead of building locally:
+
+```bash
+# Pull from GitHub Container Registry (example)
+docker pull ghcr.io/eftechcombr/mcp-glpi:latest
+
+# Run with your environment
+docker run -i --rm \
+  -e GLPI_URL="https://glpi.example.com" \
+  -e GLPI_AUTH_METHOD="password" \
+  -e GLPI_USERNAME="your_username" \
+  -e GLPI_PASSWORD="your_password" \
+  -e GLPI_CLIENT_ID="your_client_id" \
+  ghcr.io/eftechcombr/mcp-glpi:latest
+```
+
+### Volume mounts
+
+The server stores no persistent data on disk — all state is held in the GLPI
+API session. Volume mounts are not required for normal operation, but you can
+mount them for debugging or custom certificate authorities:
+
+```bash
+# Mount a custom CA bundle for the GLPI API
+docker run -i --rm \
+  -v /host/path/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro \
+  -e GLPI_URL="https://glpi.example.com" \
+  -e GLPI_AUTH_METHOD="password" \
+  -e GLPI_USERNAME="your_username" \
+  -e GLPI_PASSWORD="your_password" \
+  -e GLPI_CLIENT_ID="your_client_id" \
+  mcp-glpi
+```
+
+### Viewing logs
+
+```bash
+# Follow logs from a named container
+docker logs -f mcp-glpi
+
+# With Docker Compose
+docker compose logs -f
+```
+
+### Smoke testing the Docker image
+
+The `docker-compose.yml` includes a smoke-test service that runs the
+integration tests against a real GLPI instance:
+
+```bash
+# Build and run the smoke test
+docker compose --profile smoke run --rm mcp-glpi-smoke
+```
+
+This uses the `builder` stage image (includes dev dependencies and source) and
+executes `npm run smoke -- --write`.
+
+### Image details
+
+| Aspect | Detail |
+|---|---|
+| Base image | `node:20-alpine` |
+| Final user | `nodeuser:1001` (non-root) |
+| Build stages | 2 (builder + runner) |
+| Build optimizations | Layer caching, multi-stage, `npm cache clean` |
+| .dockerignore | Included — excludes `node_modules/`, `.git/`, `.env`, `.context/`, etc. |
+
+### .dockerignore
+
+The project includes a [`.dockerignore`](./.dockerignore) file that excludes
+unnecessary files from the Docker build context, resulting in faster builds
+and smaller image sizes:
+
+- `node_modules/` — rebuilt inside the container
+- `dist/` — rebuilt inside the container
+- `.env` — passed at runtime, never baked into the image
+- `.git/` — not needed for production builds
+- `.context/` — AI development scaffolding only
+- `*.log`, `.DS_Store` — OS and tooling artifacts
+
+### Troubleshooting
+
+**Container exits immediately with "GLPI_URL environment variable is required"**
+→ You forgot to pass environment variables. Use `--env-file .env` or individual
+`-e` flags.
+
+**Claude Desktop shows "No tools found" or "Server disconnected"**
+→ The `-i` flag is missing from the Docker args. MCP stdio transport requires
+stdin to be open. Ensure your config uses `-i` and does **not** use `-t`.
+
+**Connection refused to GLPI**
+→ The container can reach your GLPI instance? If GLPI runs on `localhost`,
+use `host.docker.internal` (macOS/Windows) or `--network host` (Linux) instead
+of `localhost` in `GLPI_URL`.
+
+**Slow first response**
+→ The server lazily initializes the GLPI session on the first tool call. This
+is expected — subsequent calls reuse the session.
 
 ## License
 

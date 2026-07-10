@@ -1,0 +1,40 @@
+services:
+  mcp-glpi:
+    build: .
+    container_name: mcp-glpi
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - GLPI_URL=${GLPI_URL}
+      - GLPI_AUTH_METHOD=${GLPI_AUTH_METHOD:-password}
+      - GLPI_USERNAME=${GLPI_USERNAME}
+      - GLPI_PASSWORD=${GLPI_PASSWORD}
+      - GLPI_CLIENT_ID=${GLPI_CLIENT_ID}
+      - GLPI_CLIENT_SECRET=${GLPI_CLIENT_SECRET}
+      - GLPI_ACCESS_TOKEN=${GLPI_ACCESS_TOKEN}
+      - GLPI_TIMEOUT_MS=${GLPI_TIMEOUT_MS:-15000}
+      - GLPI_MAX_RETRIES=${GLPI_MAX_RETRIES:-2}
+      - GLPI_ENTITY_ID=${GLPI_ENTITY_ID}
+      - GLPI_PROFILE_ID=${GLPI_PROFILE_ID}
+      - GLPI_ENTITY_RECURSIVE=${GLPI_ENTITY_RECURSIVE:-false}
+      - GLPI_DEBUG=${GLPI_DEBUG:-false}
+
+  mcp-glpi-smoke:
+    profiles: ["smoke"]
+    build:
+      target: builder
+    container_name: mcp-glpi-smoke
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - GLPI_URL=${GLPI_URL}
+      - GLPI_AUTH_METHOD=${GLPI_AUTH_METHOD:-password}
+      - GLPI_USERNAME=${GLPI_USERNAME}
+      - GLPI_PASSWORD=${GLPI_PASSWORD}
+      - GLPI_CLIENT_ID=${GLPI_CLIENT_ID}
+      - GLPI_CLIENT_SECRET=${GLPI_CLIENT_SECRET}
+      - GLPI_ACCESS_TOKEN=${GLPI_ACCESS_TOKEN}
+      - GLPI_TIMEOUT_MS=${GLPI_TIMEOUT_MS:-15000}
+    command: ["npm", "run", "smoke", "--", "--write"]

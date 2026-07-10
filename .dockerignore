@@ -1,0 +1,44 @@
+# Dependencies — re-installed inside the container
+node_modules/
+
+# Build output — rebuilt inside the container
+dist/
+
+# Environment files — passed at runtime, not built into the image
+.env
+.env.local
+.env.*.local
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# IDE / OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Context scaffolding (development only)
+.context/
+
+# Test output and coverage
+coverage/
+.nyc_output/
+
+# OS package manager
+.docker/
+
+# npm packaging artifacts
+*.tgz
+.npm/
+
+# Documentation source
+docs/
