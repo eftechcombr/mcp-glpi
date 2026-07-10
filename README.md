@@ -44,7 +44,7 @@ v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
 (Setup → General → OAuth2 Client) with the appropriate grant type enabled.
 
 | Env var | Required | Default | Description |
-|---|---|---|---|---|
+|---|---|---|---|
 | `GLPI_URL` | yes | — | Base URL of the GLPI instance (no trailing slash) |
 | `GLPI_AUTH_METHOD` | no | `password` | `password`, `client_credentials`, or `bearer` |
 | `GLPI_USERNAME` | yes* | — | Login (password grant) |
@@ -478,7 +478,7 @@ executes `bun run smoke --write`.
 ### Image details
 
 | Aspect | Detail |
-|---|---|---|
+|---|---|
 | Base image | `oven/bun:1-alpine` |
 | Final user | `bunuser:1001` (non-root) |
 | Build stages | 2 (builder + runner) |
