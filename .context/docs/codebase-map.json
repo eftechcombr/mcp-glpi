@@ -1,0 +1,389 @@
+{
+  "version": "1.0.0",
+  "generated": "2026-07-09T23:58:35.816Z",
+  "stack": {
+    "primaryLanguage": "typescript",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "frameworks": [],
+    "buildTools": [],
+    "testFrameworks": [],
+    "packageManager": "npm",
+    "isMonorepo": false,
+    "hasDocker": false,
+    "hasCI": false,
+    "nodeVersion": ">=18.0.0",
+    "runtimeEnvironment": "node"
+  },
+  "structure": {
+    "totalFiles": 14,
+    "rootPath": ".",
+    "topDirectories": [
+      {
+        "name": "scripts",
+        "fileCount": 1,
+        "description": "Build and utility scripts"
+      },
+      {
+        "name": "src",
+        "fileCount": 5,
+        "description": "Source code root"
+      },
+      {
+        "name": "test",
+        "fileCount": 2,
+        "description": "Test files"
+      }
+    ],
+    "languageDistribution": [
+      {
+        "extension": ".ts",
+        "count": 8
+      },
+      {
+        "extension": ".json",
+        "count": 3
+      },
+      {
+        "extension": ".md",
+        "count": 2
+      }
+    ]
+  },
+  "architecture": {
+    "layers": [],
+    "patterns": [],
+    "entryPoints": [
+      "src/index.ts"
+    ],
+    "mainEntryPoints": [
+      "src/index.ts"
+    ],
+    "moduleExports": []
+  },
+  "symbols": {
+    "classes": [
+      {
+        "name": "GlpiError",
+        "kind": "class",
+        "file": "src/http.ts",
+        "line": 33,
+        "exported": true
+      },
+      {
+        "name": "GlpiHttp",
+        "kind": "class",
+        "file": "src/http.ts",
+        "line": 83,
+        "exported": true
+      },
+      {
+        "name": "GlpiSearch",
+        "kind": "class",
+        "file": "src/search.ts",
+        "line": 70,
+        "exported": true
+      },
+      {
+        "name": "SearchOptionsCache",
+        "kind": "class",
+        "file": "src/search-options.ts",
+        "line": 39,
+        "exported": true
+      }
+    ],
+    "interfaces": [
+      {
+        "name": "GlpiHttpConfig",
+        "kind": "interface",
+        "file": "src/http.ts",
+        "line": 10,
+        "exported": true
+      },
+      {
+        "name": "GlpiRawError",
+        "kind": "interface",
+        "file": "src/http.ts",
+        "line": 24,
+        "exported": true
+      },
+      {
+        "name": "RequestOptions",
+        "kind": "interface",
+        "file": "src/http.ts",
+        "line": 56,
+        "exported": true
+      },
+      {
+        "name": "RequestResult",
+        "kind": "interface",
+        "file": "src/http.ts",
+        "line": 70,
+        "exported": true
+      },
+      {
+        "name": "SearchCriterion",
+        "kind": "interface",
+        "file": "src/search.ts",
+        "line": 28,
+        "exported": true
+      },
+      {
+        "name": "SearchOption",
+        "kind": "interface",
+        "file": "src/search-options.ts",
+        "line": 15,
+        "exported": true
+      },
+      {
+        "name": "SearchOptions",
+        "kind": "interface",
+        "file": "src/search.ts",
+        "line": 36,
+        "exported": true
+      },
+      {
+        "name": "SearchOptionsCatalogue",
+        "kind": "interface",
+        "file": "src/search-options.ts",
+        "line": 27,
+        "exported": true
+      },
+      {
+        "name": "SearchResponse",
+        "kind": "interface",
+        "file": "src/search.ts",
+        "line": 57,
+        "exported": true
+      }
+    ],
+    "functions": [
+      {
+        "name": "authedHttp",
+        "kind": "function",
+        "file": "test/search.test.ts",
+        "line": 24,
+        "exported": false
+      },
+      {
+        "name": "check",
+        "kind": "function",
+        "file": "scripts/smoke.ts",
+        "line": 49,
+        "exported": false
+      },
+      {
+        "name": "debugLog",
+        "kind": "function",
+        "file": "src/http.ts",
+        "line": 77,
+        "exported": false,
+        "description": "Debug logging to stderr (stdout is reserved for the MCP stdio transport)."
+      },
+      {
+        "name": "installCatalogueFetch",
+        "kind": "function",
+        "file": "test/search.test.ts",
+        "line": 72,
+        "exported": false
+      },
+      {
+        "name": "installFetch",
+        "kind": "function",
+        "file": "test/search.test.ts",
+        "line": 19,
+        "exported": false
+      },
+      {
+        "name": "installFetch",
+        "kind": "function",
+        "file": "test/http.test.ts",
+        "line": 19,
+        "exported": false
+      },
+      {
+        "name": "main",
+        "kind": "function",
+        "file": "scripts/smoke.ts",
+        "line": 71,
+        "exported": false
+      }
+    ],
+    "types": [
+      {
+        "name": "SearchLink",
+        "kind": "type",
+        "file": "src/search.ts",
+        "line": 26,
+        "exported": true
+      },
+      {
+        "name": "SearchType",
+        "kind": "type",
+        "file": "src/search.ts",
+        "line": 14,
+        "exported": true
+      },
+      {
+        "name": "FetchHandler",
+        "kind": "type",
+        "file": "test/search.test.ts",
+        "line": 17,
+        "exported": false
+      },
+      {
+        "name": "FetchHandler",
+        "kind": "type",
+        "file": "test/http.test.ts",
+        "line": 17,
+        "exported": false
+      }
+    ],
+    "enums": []
+  },
+  "publicAPI": [
+    {
+      "name": "GlpiError",
+      "kind": "class",
+      "file": "src/http.ts",
+      "line": 33,
+      "exported": true
+    },
+    {
+      "name": "GlpiHttp",
+      "kind": "class",
+      "file": "src/http.ts",
+      "line": 83,
+      "exported": true
+    },
+    {
+      "name": "GlpiHttpConfig",
+      "kind": "interface",
+      "file": "src/http.ts",
+      "line": 10,
+      "exported": true
+    },
+    {
+      "name": "GlpiRawError",
+      "kind": "interface",
+      "file": "src/http.ts",
+      "line": 24,
+      "exported": true
+    },
+    {
+      "name": "GlpiSearch",
+      "kind": "class",
+      "file": "src/search.ts",
+      "line": 70,
+      "exported": true
+    },
+    {
+      "name": "RequestOptions",
+      "kind": "interface",
+      "file": "src/http.ts",
+      "line": 56,
+      "exported": true
+    },
+    {
+      "name": "RequestResult",
+      "kind": "interface",
+      "file": "src/http.ts",
+      "line": 70,
+      "exported": true
+    },
+    {
+      "name": "SearchCriterion",
+      "kind": "interface",
+      "file": "src/search.ts",
+      "line": 28,
+      "exported": true
+    },
+    {
+      "name": "SearchLink",
+      "kind": "type",
+      "file": "src/search.ts",
+      "line": 26,
+      "exported": true
+    },
+    {
+      "name": "SearchOption",
+      "kind": "interface",
+      "file": "src/search-options.ts",
+      "line": 15,
+      "exported": true
+    },
+    {
+      "name": "SearchOptions",
+      "kind": "interface",
+      "file": "src/search.ts",
+      "line": 36,
+      "exported": true
+    },
+    {
+      "name": "SearchOptionsCache",
+      "kind": "class",
+      "file": "src/search-options.ts",
+      "line": 39,
+      "exported": true
+    },
+    {
+      "name": "SearchOptionsCatalogue",
+      "kind": "interface",
+      "file": "src/search-options.ts",
+      "line": 27,
+      "exported": true
+    },
+    {
+      "name": "SearchResponse",
+      "kind": "interface",
+      "file": "src/search.ts",
+      "line": 57,
+      "exported": true
+    },
+    {
+      "name": "SearchType",
+      "kind": "type",
+      "file": "src/search.ts",
+      "line": 14,
+      "exported": true
+    }
+  ],
+  "dependencies": {
+    "mostImported": []
+  },
+  "stats": {
+    "totalSymbols": 24,
+    "exportedSymbols": 15,
+    "analysisTimeMs": 26
+  },
+  "keyFiles": [
+    {
+      "path": "src/index.ts",
+      "description": "Main library entry point",
+      "category": "entrypoint"
+    },
+    {
+      "path": "package.json",
+      "description": "Package manifest",
+      "category": "config"
+    },
+    {
+      "path": "tsconfig.json",
+      "description": "TypeScript configuration",
+      "category": "config"
+    }
+  ],
+  "navigation": {
+    "tests": "**/*.test.{ts,js}",
+    "config": [
+      "package.json",
+      "tsconfig.json"
+    ],
+    "types": [],
+    "mainLogic": [
+      "src"
+    ]
+  }
+}
