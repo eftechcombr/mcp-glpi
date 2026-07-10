@@ -1,12 +1,11 @@
 import { strict as assert } from 'node:assert';
-import { test, mock } from 'node:test';
+import { test } from 'bun:test';
 import { GlpiHttp, GlpiError } from '../src/http.js';
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>;
 
 function installFetch(handler: FetchHandler) {
-  // @ts-expect-error overriding global fetch
-  global.fetch = mock.fn(handler);
+  global.fetch = handler as unknown as typeof fetch;
 }
 
 function makeHttp(overrides: Record<string, unknown> = {}) {

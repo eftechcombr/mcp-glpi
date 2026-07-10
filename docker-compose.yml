@@ -37,4 +37,4 @@ services:
       - GLPI_CLIENT_SECRET=${GLPI_CLIENT_SECRET}
       - GLPI_ACCESS_TOKEN=${GLPI_ACCESS_TOKEN}
       - GLPI_TIMEOUT_MS=${GLPI_TIMEOUT_MS:-15000}
-    command: ["npm", "run", "smoke", "--", "--write"]
+    command: ["bun", "run", "smoke", "--write"]

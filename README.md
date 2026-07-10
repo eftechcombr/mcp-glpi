@@ -62,7 +62,7 @@ v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
 {
   "mcpServers": {
     "glpi": {
-      "command": "npx",
+      "command": "bunx",
       "args": ["mcp-glpi"],
       "env": {
         "GLPI_URL": "https://glpi.example.com",
@@ -213,18 +213,18 @@ resolved dynamically — no longer hard-coded). Projects also support
 ```bash
 git clone https://github.com/eftechcombr/mcp-glpi.git
 cd mcp-glpi
-npm install
-npm run build
-npm test            # tsx --test test/*.test.ts
-npm run smoke       # live integration test against a real GLPI instance
-npm run smoke -- --write  # smoke test + write cycle (create → followup → delete)
+bun install
+bun run build
+bun test           # bun test
+bun run smoke      # live integration test against a real GLPI instance
+bun run smoke --write  # smoke test + write cycle (create → followup → delete)
 ```
 
 Run locally:
 
 ```bash
 cp .env.example .env   # fill in your GLPI credentials
-npm start
+bun start
 ```
 
 The smoke test reads credentials from env or `.env` (gitignored). Validated
@@ -233,7 +233,7 @@ against GLPI 11 (French locale).
 ## Docker
 
 The Docker image packages the MCP server with all dependencies, so you can run
-it anywhere Docker is installed — no Node.js or npm required on the host.
+it anywhere Docker is installed — no Bun or npm required on the host.
 
 ### Prerequisites
 
@@ -430,16 +430,16 @@ docker compose --profile smoke run --rm mcp-glpi-smoke
 ```
 
 This uses the `builder` stage image (includes dev dependencies and source) and
-executes `npm run smoke -- --write`.
+executes `bun run smoke --write`.
 
 ### Image details
 
 | Aspect | Detail |
-|---|---|
-| Base image | `node:20-alpine` |
-| Final user | `nodeuser:1001` (non-root) |
+|---|---|---|
+| Base image | `oven/bun:1-alpine` |
+| Final user | `bunuser:1001` (non-root) |
 | Build stages | 2 (builder + runner) |
-| Build optimizations | Layer caching, multi-stage, `npm cache clean` |
+| Build optimizations | Layer caching, multi-stage, `bun install --frozen-lockfile` |
 | .dockerignore | Included — excludes `node_modules/`, `.git/`, `.env`, `.context/`, etc. |
 
 ### .dockerignore
