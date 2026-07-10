@@ -191,7 +191,7 @@ cover provisioning.
 ## Development
 
 ```bash
-git clone https://github.com/GMS64260/mcp-glpi.git
+git clone https://github.com/eftechcombr/mcp-glpi.git
 cd mcp-glpi
 npm install
 npm run build

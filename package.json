@@ -44,12 +44,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/GMS64260/mcp-glpi.git"
+    "url": "https://github.com/eftechcombr/mcp-glpi.git"
   },
   "bugs": {
-    "url": "https://github.com/GMS64260/mcp-glpi/issues"
+    "url": "https://github.com/eftechcombr/mcp-glpi/issues"
   },
-  "homepage": "https://github.com/GMS64260/mcp-glpi#readme",
+  "homepage": "https://github.com/eftechcombr/mcp-glpi#readme",
   "engines": {
     "node": ">=18.0.0"
   },
