@@ -292,24 +292,21 @@ it anywhere Docker is installed — no Bun or npm required on the host.
 # 1. Copy and fill in your GLPI credentials
 cp .env.example .env
 
-# 2. Build the image
-docker compose build
-
-# 3. Start the server (detached)
+# 2. Pull and start the server (detached)
 docker compose up -d
 ```
 
 ### Quick start with Docker directly
 
 ```bash
-# 1. Build the image
-docker build -t mcp-glpi .
+# 1. Pull the image
+docker pull ghcr.io/eftechcombr/mcp-glpi:1.0
 
 # 2. Run the container with your .env file
 docker run -d --name mcp-glpi \
   --restart unless-stopped \
   --env-file .env \
-  mcp-glpi
+  ghcr.io/eftechcombr/mcp-glpi:1.0
 ```
 
 The container runs as a non-root user (`bunuser:1001`) and reads all
@@ -350,7 +347,7 @@ Add the following entry to your `claude_desktop_config.json`:
         "-e", "GLPI_USERNAME=your_username",
         "-e", "GLPI_PASSWORD=your_password",
         "-e", "GLPI_CLIENT_ID=your_client_id",
-        "mcp-glpi"
+        "ghcr.io/eftechcombr/mcp-glpi:1.0"
       ]
     }
   }
@@ -378,7 +375,7 @@ For many environment variables, use a file-based approach for clarity:
       "args": [
         "run", "-i", "--rm",
         "--env-file", "/absolute/path/to/.env",
-        "mcp-glpi"
+        "ghcr.io/eftechcombr/mcp-glpi:1.0"
       ]
     }
   }
@@ -405,7 +402,7 @@ Configure the Docker container as the server process:
         "-e", "GLPI_USERNAME=your_username",
         "-e", "GLPI_PASSWORD=your_password",
         "-e", "GLPI_CLIENT_ID=your_client_id",
-        "mcp-glpi"
+        "ghcr.io/eftechcombr/mcp-glpi:1.0"
       ]
     }
   }
@@ -424,8 +421,8 @@ ones are required for each auth method.
 You can pull a pre-built image from a registry instead of building locally:
 
 ```bash
-# Pull from GitHub Container Registry (example)
-docker pull ghcr.io/eftechcombr/mcp-glpi:latest
+# Pull from GitHub Container Registry
+docker pull ghcr.io/eftechcombr/mcp-glpi:1.0
 
 # Run with your environment
 docker run -i --rm \
@@ -434,7 +431,7 @@ docker run -i --rm \
   -e GLPI_USERNAME="your_username" \
   -e GLPI_PASSWORD="your_password" \
   -e GLPI_CLIENT_ID="your_client_id" \
-  ghcr.io/eftechcombr/mcp-glpi:latest
+  ghcr.io/eftechcombr/mcp-glpi:1.0
 ```
 
 ### Volume mounts
@@ -452,7 +449,7 @@ docker run -i --rm \
   -e GLPI_USERNAME="your_username" \
   -e GLPI_PASSWORD="your_password" \
   -e GLPI_CLIENT_ID="your_client_id" \
-  mcp-glpi
+  ghcr.io/eftechcombr/mcp-glpi:1.0
 ```
 
 ### Viewing logs
