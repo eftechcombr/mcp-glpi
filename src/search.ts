@@ -67,13 +67,32 @@ const SEARCHTYPE_RSQL_MAP: Record<string, (prop: string, value: string) => strin
   notunder: (prop, v) => `${prop}!=${v}`,
 };
 
+/**
+ * Escape special RSQL characters in a value used inside wildcard patterns.
+ * This is used by contains/notcontains search types.
+ */
 function escapeRsqlValue(v: string): string {
   return v.replace(/'/g, "\\'").replace(/\*/g, '\\*');
 }
 
+/**
+ * Format a value for use in RSQL filter expressions.
+ *
+ * RSQL (RESTful Service Query Language) uses:
+ *   - Unquoted literals for simple values (numbers, booleans, simple strings)
+ *   - Single-quoted strings for values containing special characters
+ *   - Backslash-escaped single quotes inside quoted strings
+ *
+ * This function ensures all values are properly encoded to prevent RSQL injection.
+ * It ALWAYS quotes string values that contain RSQL special characters,
+ * regardless of whether they start with a quote character.
+ */
 function formatRsqlValue(v: string | number | boolean): string {
   if (typeof v === 'string') {
-    if (/[&\|!=<>\(\)\;\*, ]/.test(v) && !v.startsWith("'")) {
+    // RSQL special characters that require quoting
+    const needsQuoting = /[&\|!=<>\(\)\;\*, ]/.test(v);
+    if (needsQuoting) {
+      // Escape single quotes inside the string, then wrap in single quotes
       return `'${v.replace(/'/g, "\\'")}'`;
     }
     return v;

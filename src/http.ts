@@ -73,6 +73,8 @@ export class GlpiHttp {
   readonly config: GlpiHttpConfig;
   private accessToken: string | null = null;
   private tokenExpiresAt: number = 0;
+  /** Mutex lock to prevent concurrent token refresh requests */
+  private sessionLock: Promise<void> | null = null;
 
   constructor(config: GlpiHttpConfig) {
     this.config = {
@@ -162,14 +164,74 @@ export class GlpiHttp {
     debugLog(`OAuth2 token obtained via ${params.grant_type}, expires in ${data.expires_in ?? 'never'}s`);
   }
 
-  killSession(): void {
+  /**
+   * Kill the current GLPI session.
+   *
+   * Calls the GLPI logout endpoint to revoke the server-side session token,
+   * then clears the in-memory token reference.
+   *
+   * Note: The logout call is best-effort (does not throw on failure) so that
+   * server shutdown is not blocked by an unreachable GLPI.
+   */
+  async killSession(): Promise<void> {
+    const token = this.accessToken;
+    // Clear in-memory token immediately to prevent further use
     this.accessToken = null;
     this.tokenExpiresAt = 0;
+
+    // Best-effort server-side logout: revoke the token
+    if (token) {
+      try {
+        await this.fetchWithTimeout(`${this.config.url}/api.php/logout`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        debugLog('GLPI session terminated server-side');
+      } catch {
+        // Swallow — GLPI may be unreachable during shutdown
+        debugLog('Warning: could not terminate GLPI session server-side');
+      }
+    }
   }
 
+  /**
+   * Ensure a valid session exists, with mutual exclusion to prevent
+   * concurrent token refresh (race condition).
+   *
+   * If multiple requests arrive while the token is expired, only the
+   * first one initiates re-auth; subsequent requests wait on the same
+   * lock and use the refreshed token.
+   */
   private async ensureSession(): Promise<void> {
-    if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
-      await this.initSession();
+    // Fast path: token is still valid
+    if (this.accessToken && Date.now() < this.tokenExpiresAt) {
+      return;
+    }
+
+    // Mutex: only one request should re-authenticate at a time
+    if (this.sessionLock) {
+      // Another request is already refreshing; wait for it
+      await this.sessionLock;
+      // After waiting, check if the token is now valid
+      if (this.accessToken && Date.now() < this.tokenExpiresAt) {
+        return;
+      }
+    }
+
+    // Acquire the lock
+    let resolveLock: () => void;
+    this.sessionLock = new Promise<void>((resolve) => { resolveLock = resolve; });
+
+    try {
+      // Double-check: another request may have refreshed while we were
+      // acquiring the lock
+      if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
+        await this.initSession();
+      }
+    } finally {
+      // Release the lock
+      if (resolveLock!) resolveLock!();
+      this.sessionLock = null;
     }
   }
 

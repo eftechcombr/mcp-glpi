@@ -360,6 +360,10 @@ export interface GetOptions {
   with_disks?: boolean;
 }
 
+/**
+ * Known GLPI itemtypes and their API paths.
+ * Used to prevent path traversal via unvalidated user input.
+ */
 const ITEMTYPE_PATH_MAP: Record<string, string> = {
   Ticket: 'Assistance/Ticket',
   Problem: 'Assistance/Problem',
@@ -387,7 +391,21 @@ const ITEMTYPE_PATH_MAP: Record<string, string> = {
   Location: 'Dropdowns/Location',
   Project: 'Project/Project',
   ProjectTask: 'Project/Task',
+  ITILFollowup: 'ITILFollowup',
+  ITILSolution: 'ITILSolution',
+  TicketTask: 'TicketTask',
+  TicketValidation: 'TicketValidation',
+  Document_Item: 'Document_Item',
+  Ticket_Ticket: 'Ticket_Ticket',
+  Group_User: 'Group_User',
+  TicketSatisfaction: 'TicketSatisfaction',
+  Ticket_User: 'Ticket_User',
+  Group_Ticket: 'Group_Ticket',
 };
+export { ITEMTYPE_PATH_MAP };
+
+/** Set of valid itemtype names for validation */
+export const VALID_ITEMTYPES: ReadonlySet<string> = new Set(Object.keys(ITEMTYPE_PATH_MAP));
 
 export class GlpiClient {
   readonly http: GlpiHttp;
@@ -408,8 +426,16 @@ export class GlpiClient {
     this.http.killSession();
   }
 
+  /**
+   * Resolve an itemtype to its GLPI REST API path.
+   * Throws if the itemtype is not in the known map (prevents path traversal).
+   */
   private path(itemtype: string): string {
-    return ITEMTYPE_PATH_MAP[itemtype] ?? itemtype;
+    const resolved = ITEMTYPE_PATH_MAP[itemtype];
+    if (!resolved) {
+      throw new Error(`Unknown itemtype: "${itemtype}". Allowed types: ${Object.keys(ITEMTYPE_PATH_MAP).sort().join(', ')}`);
+    }
+    return resolved;
   }
 
   private toQuery(o: ListOptions | GetOptions): Record<string, string> {

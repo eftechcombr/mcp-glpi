@@ -26,7 +26,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { GlpiClient, GlpiConfig, ListOptions } from './glpi-client.js';
+import { GlpiClient, GlpiConfig, ListOptions, VALID_ITEMTYPES } from './glpi-client.js';
 import { GlpiError } from './http.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
 
@@ -208,6 +208,17 @@ function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
   opts.expand_dropdowns =
     args.expand_dropdowns === false ? false : true;
   return opts;
+}
+
+/** Validate that an itemtype string is known, preventing path traversal. */
+function validateItemtype(itemtype: string): asserts itemtype is string {
+  if (!VALID_ITEMTYPES.has(itemtype as any)) {
+    const allowed = Array.from(VALID_ITEMTYPES).sort().join(', ');
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `Unknown itemtype: "${itemtype}". Allowed values: ${allowed}`
+    );
+  }
 }
 
 interface CriteriaArg {
@@ -1718,6 +1729,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'glpi_search_v2': {
         const itemtype = args.itemtype as string;
         if (!itemtype) throw new McpError(ErrorCode.InvalidParams, 'itemtype required');
+        validateItemtype(itemtype);
         const rawCriteria = (args.criteria as CriteriaArg[]) ?? [];
         const criteria = await resolveCriteria(client, itemtype, rawCriteria);
         const result = await client.search.search(itemtype, {
@@ -1737,6 +1749,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'glpi_count': {
         const itemtype = args.itemtype as string;
         if (!itemtype) throw new McpError(ErrorCode.InvalidParams, 'itemtype required');
+        validateItemtype(itemtype);
         const rawCriteria = (args.criteria as CriteriaArg[]) ?? [];
         const criteria = await resolveCriteria(client, itemtype, rawCriteria);
         const totalcount = await client.search.count(itemtype, criteria);
@@ -1746,6 +1759,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'glpi_list_search_options': {
         const itemtype = args.itemtype as string;
         if (!itemtype) throw new McpError(ErrorCode.InvalidParams, 'itemtype required');
+        validateItemtype(itemtype);
         const cat = await client.searchOptions.get(itemtype);
         if (!cat) {
           return text({ itemtype, count: 0, options: [], note: 'listSearchOptions endpoint unavailable in GLPI v2.3.0' });
@@ -1767,6 +1781,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!itemtype || field === undefined || !searchtype || value === undefined) {
           throw new McpError(ErrorCode.InvalidParams, 'itemtype, field, searchtype, value required');
         }
+        validateItemtype(itemtype);
         const result = await client.search.search(itemtype, {
           criteria: [{ field, searchtype, value }],
           expandDropdowns: true,
@@ -1896,7 +1911,7 @@ async function main() {
 
     const shutdown = async () => {
       try {
-        client.killSession();
+        await client.killSession();
       } catch (error) {
         console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
       }
