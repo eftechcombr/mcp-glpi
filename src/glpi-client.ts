@@ -605,6 +605,14 @@ export class GlpiClient {
     return { id: id ?? 0 };
   }
 
+  async updateTicketTask(id: number, updates: Record<string, unknown>): Promise<boolean> {
+    return this.updateItem('TicketTask', id, updates);
+  }
+
+  async deleteTicketTask(id: number, force: boolean = false): Promise<boolean> {
+    return this.deleteItem('TicketTask', id, force);
+  }
+
   async addTicketSolution(
     ticketId: number,
     content: string,
