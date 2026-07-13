@@ -496,6 +496,35 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'glpi_update_task',
+      description: 'Update a task (with time tracking) on a ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          content: { type: 'string' },
+          actiontime: { type: 'number' },
+          is_private: { type: 'boolean' },
+          state: { type: 'number', description: '0=Info 1=Todo 2=Done' },
+          users_id_tech: { type: 'number' },
+          groups_id_tech: { type: 'number' },
+        },
+        required: ['id'],
+      },
+    },
+    {
+      name: 'glpi_delete_task',
+      description: '⚠️ DESTRUCTIVE: delete a task from a ticket.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          force: { type: 'boolean', description: 'true=purge (irrecoverable)' },
+        },
+        required: ['id'],
+      },
+    },
+    {
       name: 'glpi_add_solution',
       description: 'Add a solution to a ticket.',
       inputSchema: {
@@ -1289,6 +1318,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           groups_id_tech: args.groups_id_tech as number,
         });
         return text({ success: true, task_id: result.id });
+      }
+
+      case 'glpi_update_task': {
+        const id = args.id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const updates: Record<string, unknown> = {};
+        ['content', 'actiontime', 'is_private', 'state', 'users_id_tech', 'groups_id_tech'].forEach((k) => {
+          if (args[k] !== undefined) updates[k] = args[k];
+        });
+        await client.updateTicketTask(id, updates);
+        return text({ success: true, id });
+      }
+
+      case 'glpi_delete_task': {
+        const id = args.id as number;
+        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        await client.deleteTicketTask(id, args.force as boolean);
+        return text({ success: true, id, purged: !!args.force });
       }
 
       case 'glpi_add_solution': {
