@@ -502,6 +502,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           id: { type: 'number' },
+          ticket_id: { type: 'number', description: 'Ticket ID (required if direct TicketTask update is not supported by the GLPI version)' },
           content: { type: 'string' },
           actiontime: { type: 'number' },
           is_private: { type: 'boolean' },
@@ -519,6 +520,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           id: { type: 'number' },
+          ticket_id: { type: 'number', description: 'Ticket ID (required if direct TicketTask delete is not supported by the GLPI version)' },
           force: { type: 'boolean', description: 'true=purge (irrecoverable)' },
         },
         required: ['id'],
@@ -1327,14 +1329,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ['content', 'actiontime', 'is_private', 'state', 'users_id_tech', 'groups_id_tech'].forEach((k) => {
           if (args[k] !== undefined) updates[k] = args[k];
         });
-        await client.updateTicketTask(id, updates);
+        const ticketId = args.ticket_id as number | undefined;
+        await client.updateTicketTask(id, updates, ticketId);
         return text({ success: true, id });
       }
 
       case 'glpi_delete_task': {
         const id = args.id as number;
         if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
-        await client.deleteTicketTask(id, args.force as boolean);
+        const ticketId = args.ticket_id as number | undefined;
+        await client.deleteTicketTask(id, args.force as boolean, ticketId);
         return text({ success: true, id, purged: !!args.force });
       }
 

@@ -1,6 +1,8 @@
 services:
   mcp-glpi:
-    image: ghcr.io/eftechcombr/mcp-glpi:1.0
+    build: 
+      context: . 
+    image: localhost/mcp-glpi:dev
     container_name: mcp-glpi
     restart: unless-stopped
     env_file:

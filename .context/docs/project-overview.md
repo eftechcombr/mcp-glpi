@@ -7,15 +7,15 @@ mcp-glpi is an MCP (Model Context Protocol) server that exposes GLPI IT Service 
 - Root: `/Users/eduardo/git/github/eftechcombr/mcp-glpi`
 - Languages: TypeScript (5 source files, 2 test files, 1 script)
 - Entry: `src/index.ts` — MCP server with tool/resource handlers
-- Package: `mcp-glpi` v3.2.0 — published on npm
+- Package: `mcp-glpi` v3.3.0 — published on npm
 - License: MIT
 - Runtime: Bun 1.0+
 - Full analysis: [`codebase-map.json`](./codebase-map.json)
 
 ## Entry Points
 
-- **CLI**: `dist/index.js` (via `npx mcp-glpi` or `npm start`)
-- **Dev**: `src/index.ts` (via `bun run src/index.ts` or `npm run dev`)
+- **CLI**: `dist/index.js` (via `bun start` or `npx mcp-glpi`)
+- **Dev**: `src/index.ts` (via `bun run dev`)
 - **Library exports**: `GlpiHttp`, `GlpiSearch`, `SearchOptionsCache`, `GlpiError`, typed interfaces in `src/http.ts`, `src/search.ts`, `src/search-options.ts`
 
 ## Key Exports
@@ -57,7 +57,7 @@ All public API symbols are listed in `codebase-map.json`. Major exports include:
 
 1. Clone the repo and run `bun install`.
 2. Set environment variables: `GLPI_URL`, `GLPI_AUTH_METHOD`, and credentials per `.env.example` (OAuth2 password grant, client_credentials, or bearer).
-3. Run `npm start` to start the MCP server.
+3. Run `bun start` to start the MCP server.
 4. Configure Claude Desktop / Claude Code to connect to the MCP server.
 5. Review [Development Workflow](./development-workflow.md) for day-to-day tasks.
 

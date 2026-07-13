@@ -14,5 +14,5 @@ relevantFiles:
 ### Running Tests
 
 ```bash
-npm test
+bun test
 ```

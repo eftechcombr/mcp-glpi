@@ -14,24 +14,24 @@ This document collects the tools, scripts, and configurations that keep contribu
 
 ```bash
 # Build
-npm run build          # Compile TypeScript → dist/
+bun run build          # Compile TypeScript → dist/
 
 # Dev mode (bun, no compilation step)
-npm run dev
+bun run dev
 
 # Lint
-npm run lint           # Check lint rules
-npm run lint:fix       # Auto-fix lint issues
+bun run lint           # Check lint rules
+bun run lint:fix       # Auto-fix lint issues
 
 # Tests
-npm test               # Run all tests via bun
-npm test -- --watch    # Watch mode
+bun test               # Run all tests via bun
+bun test --watch       # Watch mode
 
 # Smoke test (requires GLPI env vars)
-npm run smoke
+bun run smoke
 
 # Watch mode for compilation
-npm run watch          # tsc --watch
+bun run watch          # tsc --watch
 ```
 
 ## IDE / Editor Setup
@@ -44,8 +44,8 @@ npm run watch          # tsc --watch
 
 ## Productivity Tips
 
-- Use `npm run dev` for rapid iteration — no build step needed.
-- Run `npm run lint` before committing to catch formatting issues early.
+- Use `bun run dev` for rapid iteration — no build step needed.
+- Run `bun run lint` before committing to catch formatting issues early.
 - Store generated artefacts in `.context/` for deterministic reruns.
 - When debugging HTTP interactions, set `GLPI_DEBUG=1` to log retries and re-auth to stderr.
 - The MCP server uses `stdio` transport — all debugging output goes to stderr, leaving stdout clean for the protocol.

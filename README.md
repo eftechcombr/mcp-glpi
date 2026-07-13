@@ -1,4 +1,4 @@
-# MCP Server for GLPI v3.2
+# MCP Server for GLPI v3.3
 
 A Model Context Protocol (MCP) server that exposes GLPI (IT Service
 Management) to AI assistants like Claude, Cline, and other MCP-compatible
@@ -31,10 +31,12 @@ README documents what's exposed today.
   explicit signals before acting.
 - **Runtime input validation** (zod) on ticket tools — clear `InvalidParams`
   errors instead of downstream GLPI failures.
-- **84 MCP tools**: covering tickets, problems, changes, assets (computers,
+- **86 MCP tools**: covering tickets, problems, changes, assets (computers,
   software, network equipment, printers, monitors, phones), knowledge base,
   contracts, suppliers, locations, projects, users, groups, categories,
   entities, documents, search, and statistics.
+- **Task lifecycle management** (v3.3): `glpi_update_task` and `glpi_delete_task`
+  tools for editing and removing ticket tasks, backed by the timeline API.
 
 ## Configuration
 

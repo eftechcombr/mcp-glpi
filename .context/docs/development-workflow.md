@@ -16,29 +16,29 @@ This project follows a trunk-based development model with short-lived feature br
 bun install
 
 # Run development server (bun, no compilation step)
-npm run dev
+bun run dev
 
 # Lint
-npm run lint
-npm run lint:fix       # auto-fix
+bun run lint
+bun run lint:fix       # auto-fix
 
 # Build for distribution (compiles to dist/)
-npm run build
+bun run build
 
 # Run all tests
-npm test
+bun test
 
 # Run tests in watch mode
-npm test -- --watch
+bun test --watch
 
 # Run smoke test (requires GLPI env vars)
-npm run smoke
+bun run smoke
 ```
 
 ## Code Review Expectations
 
 - All PRs require passing lint and tests before merge.
-- Run `npm run build && npm test` before opening a PR to mimic CI.
+- Run `bun run build && bun test` before opening a PR to mimic CI.
 - Follow Conventional Commits format: `feat(scope): message`, `fix(scope): message`, etc.
 - Cross-link new scaffolds in `.context/docs/README.md` and `.context/agents/README.md`.
 - Attach sample CLI output or generated markdown when behaviour shifts.
@@ -48,5 +48,5 @@ npm run smoke
 
 1. Start by reading the [README](../../README.md) to understand the tool catalogue.
 2. Review the [Project Overview](./project-overview.md) for architecture context.
-3. Run the test suite to verify your environment: `npm test`.
+3. Run the test suite to verify your environment: `bun test`.
 4. Explore the codebase: `src/` for source, `test/` for tests, `scripts/smoke.ts` for integration checks.

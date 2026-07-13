@@ -13,22 +13,22 @@ Quality is maintained through unit tests, integration-style tests (mocked fetch)
 
 ```bash
 # Run all tests
-npm test
+bun test
 
 # Watch mode (useful during TDD)
-npm test -- --watch
+bun test --watch
 
 # Run a single test file
 bun test test/http.test.ts
 
 # Smoke test against live GLPI
-npm run smoke
+bun run smoke
 ```
 
 ## Quality Gates
 
-- All tests must pass before merging (`npm test`).
-- `npm run lint && npm run build && npm test` must pass before PR (mimics CI).
+- All tests must pass before merging (`bun test`).
+- `bun run lint && bun run build && bun test` must pass before PR (mimics CI).
 - No formal coverage threshold is enforced, but new features should include tests.
 - Test files use `describe`/`it` blocks and `assert`/`assert.strictEqual` for assertions.
 
