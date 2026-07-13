@@ -605,11 +605,28 @@ export class GlpiClient {
     return { id: id ?? 0 };
   }
 
-  async updateTicketTask(id: number, updates: Record<string, unknown>): Promise<boolean> {
+  async updateTicketTask(id: number, updates: Record<string, unknown>, ticketId?: number): Promise<boolean> {
+    if (ticketId) {
+      await this.http.request(
+        `Assistance/Ticket/${ticketId}/Timeline/Task/${id}`,
+        { method: 'PATCH', json: updates }
+      );
+      return true;
+    }
     return this.updateItem('TicketTask', id, updates);
   }
 
-  async deleteTicketTask(id: number, force: boolean = false): Promise<boolean> {
+  async deleteTicketTask(id: number, force: boolean = false, ticketId?: number): Promise<boolean> {
+    if (ticketId) {
+      const params = new URLSearchParams();
+      if (force) params.append('force_purge', '1');
+      const query = params.toString() ? params : undefined;
+      await this.http.request(
+        `Assistance/Ticket/${ticketId}/Timeline/Task/${id}`,
+        { method: 'DELETE', query }
+      );
+      return true;
+    }
     return this.deleteItem('TicketTask', id, force);
   }
 
