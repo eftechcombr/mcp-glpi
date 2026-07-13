@@ -108,6 +108,8 @@ v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
 | `glpi_delete_ticket` | ⚠️ Delete (force=true purges) |
 | `glpi_add_followup` | Add a followup |
 | `glpi_add_task` | Add a task with time tracking |
+| `glpi_update_task` | Update task fields (content, state, duration) |
+| `glpi_delete_task` | ⚠️ Delete a task (force=true purges) |
 | `glpi_add_solution` | Add a solution |
 | `glpi_assign_ticket` | Assign to user OR group |
 | `glpi_link_tickets` | link / duplicate / parent |
@@ -231,7 +233,7 @@ resolved dynamically — no longer hard-coded). Projects also support
 | 1 | Incident |
 | 2 | Request |
 
-### Task state (for `glpi_add_task`)
+### Task state (for `glpi_add_task` / `glpi_update_task`)
 
 | ID | Label |
 |---|---|

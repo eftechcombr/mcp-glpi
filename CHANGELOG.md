@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.3.0 — 2026-07-13
+
+### Added
+
+- **`glpi_update_task` / `glpi_delete_task`**: two new MCP tools for managing
+  ticket tasks — update fields (content, state, actiontime, etc.) or
+  delete/purge a task. Backed by `updateTicketTask` and `deleteTicketTask`
+  client methods.
+
 ## 3.2.1 — 2026-07-09
 
 ### Fixed
