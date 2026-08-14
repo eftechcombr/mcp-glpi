@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.4.0 — 2026-08-14
+
+### Added
+
+- **Streamable HTTP transport** (`MCP_TRANSPORT=http`): the server can now run
+  as a hosted MCP endpoint (GET/POST/DELETE, `MCP_PATH` default `/mcp`) instead
+  of stdio only. Uses the SDK's `WebStandardStreamableHTTPServerTransport`
+  served by Bun (`src/http-server.ts`). Liveness at `GET /health` and `GET /`.
+- **Multi-tenant sessions** (`src/sessions.ts`): one `GlpiClient` per MCP
+  session keyed by `Mcp-Session-Id`, with idle-TTL eviction and session
+  revocation on close. When `GLPI_URL` is unset the server runs in multi-tenant
+  mode; when set it keeps the single-tenant default-client behaviour.
+- **`glpi_configure_connection` tool**: configures the GLPI connection for the
+  current session (url, auth method, credentials). Credentials are held in
+  memory only, never logged, validated with a live `initSession()` probe, and
+  revoked when the session ends.
+- **`glpi_connection_status` tool**: reports whether a GLPI connection is
+  configured for the session (auth method + URL, never credentials).
+- **HTTP server env vars**: `HOST`, `PORT`, `MCP_PATH`, `SESSION_TTL_MS`.
+- **Docker**: same image serves HTTP mode via `MCP_TRANSPORT=http`; `EXPOSE
+  3000` documented for that mode.
+
 ## 3.3.0 — 2026-07-13
 
 ### Added

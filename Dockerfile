@@ -37,9 +37,10 @@ USER bunuser
 
 ENV NODE_ENV=production
 
-# Note: This server uses MCP stdio transport. EXPOSE is not required for
-# stdio-based communication but is kept for documentation purposes and
-# future HTTP/SSE transport compatibility.
+# Default transport is MCP stdio (no TCP port needed).
+# To serve over Streamable HTTP (multi-tenant), run with MCP_TRANSPORT=http:
+#   docker run -e MCP_TRANSPORT=http -e PORT=3000 -p 3000:3000 ...
+# The server then listens on {HOST}:{PORT}{MCP_PATH} (default /mcp).
 EXPOSE 3000
 
 ENTRYPOINT ["bun", "dist/index.js"]

@@ -29,6 +29,8 @@ import { z } from 'zod';
 import { GlpiClient, GlpiConfig, ListOptions, VALID_ITEMTYPES } from './glpi-client.js';
 import { GlpiError } from './http.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
+import { SessionManager } from './sessions.js';
+import { startHttpServer } from './http-server.js';
 
 // ---------------------------------------------------------------------------
 // Validation Schemas
@@ -178,6 +180,66 @@ function getConfig(): GlpiConfig {
   };
 }
 
+const connectionSchema = z.object({
+  url: z.string().url(),
+  auth_method: z.enum(['password', 'client_credentials', 'bearer']).default('password'),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  client_id: z.string().optional(),
+  client_secret: z.string().optional(),
+  access_token: z.string().optional(),
+  entity_id: z.number().int().optional(),
+  profile_id: z.number().int().optional(),
+  entity_recursive: z.boolean().optional(),
+  timeout_ms: z.number().int().positive().optional(),
+  max_retries: z.number().int().min(0).optional(),
+});
+
+/**
+ * Validate connection arguments against the chosen auth method and build a
+ * GlpiConfig. Never logs or echoes credentials.
+ */
+function buildClientConfig(raw: z.infer<typeof connectionSchema>): GlpiConfig {
+  const config: GlpiConfig = {
+    url: raw.url,
+    authMethod: raw.auth_method,
+    username: raw.username,
+    password: raw.password,
+    clientId: raw.client_id,
+    clientSecret: raw.client_secret,
+    accessToken: raw.access_token,
+    entityId: raw.entity_id,
+    profileId: raw.profile_id,
+    entityRecursive: raw.entity_recursive,
+    timeoutMs: raw.timeout_ms,
+    maxRetries: raw.max_retries,
+  };
+
+  const missing: string[] = [];
+  if (raw.auth_method === 'password' && (!raw.username || !raw.password)) missing.push('username, password');
+  if (raw.auth_method === 'client_credentials' && !raw.client_id) missing.push('client_id');
+  if (raw.auth_method === 'bearer' && !raw.access_token) missing.push('access_token');
+  if (missing.length > 0) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `auth_method "${raw.auth_method}" requires: ${missing.join(', ')}`
+    );
+  }
+  return config;
+}
+
+function sessionTtlMs(): number {
+  const raw = process.env.SESSION_TTL_MS;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 24 * 60 * 60 * 1000;
+}
+
+/** Returns null when GLPI_URL is unset (multi-tenant HTTP mode). */
+function tryGetConfig(): GlpiConfig | null {
+  if (!process.env.GLPI_URL) return null;
+  return getConfig();
+}
+
 /**
  * Parse common list-tool arguments into a ListOptions.
  *
@@ -271,11 +333,12 @@ function formatTicketSummary(t: any) {
 // ---------------------------------------------------------------------------
 
 const server = new Server(
-  { name: 'mcp-glpi', version: '3.0.0' },
+  { name: 'mcp-glpi', version: '3.4.0' },
   { capabilities: { tools: {}, resources: {} } }
 );
 
 let client: GlpiClient;
+let sessionManager: SessionManager;
 
 // ---------------------------------------------------------------------------
 // Tool registration
@@ -309,6 +372,12 @@ interface ToolAnnotations {
 }
 
 function toolAnnotations(name: string): ToolAnnotations {
+  if (name === 'glpi_connection_status') {
+    return { readOnlyHint: true, openWorldHint: false };
+  }
+  if (name === 'glpi_configure_connection') {
+    return { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  }
   if (/^glpi_(list_|get_|search|count$|tickets_stats)/.test(name)) {
     return { readOnlyHint: true, openWorldHint: false };
   }
@@ -328,6 +397,40 @@ function annotate<T extends { name: string }>(tool: T): T & { annotations: ToolA
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    // ============== CONNECTION ==============
+    {
+      name: 'glpi_configure_connection',
+      description:
+        'Configure the GLPI connection for this session. Required before any other tool when the ' +
+        'server runs in multi-tenant mode (no GLPI_URL set). Credentials are held in memory only, ' +
+        'are never logged, and are revoked when the session ends.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Base URL of the GLPI instance (no trailing slash)' },
+          auth_method: { type: 'string', enum: ['password', 'client_credentials', 'bearer'], description: 'Default password' },
+          username: { type: 'string' },
+          password: { type: 'string' },
+          client_id: { type: 'string' },
+          client_secret: { type: 'string' },
+          access_token: { type: 'string' },
+          entity_id: { type: 'number' },
+          profile_id: { type: 'number' },
+          entity_recursive: { type: 'boolean' },
+          timeout_ms: { type: 'number' },
+          max_retries: { type: 'number' },
+        },
+        required: ['url'],
+      },
+    },
+    {
+      name: 'glpi_connection_status',
+      description:
+        'Report whether this session has a GLPI connection configured, and which auth method and ' +
+        'URL it uses. Never returns credentials.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+
     // ============== READ — TICKETS ==============
     {
       name: 'glpi_list_tickets',
@@ -1132,12 +1235,53 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 // Tool dispatch
 // ---------------------------------------------------------------------------
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: argsRaw } = request.params;
   const args = (argsRaw ?? {}) as Record<string, unknown>;
 
+  const isConnectionTool =
+    name === 'glpi_configure_connection' || name === 'glpi_connection_status';
+  const client = isConnectionTool
+    ? (undefined as unknown as GlpiClient)
+    : sessionManager.get(extra.sessionId);
+
   try {
     switch (name) {
+      // ==== CONNECTION ====
+      case 'glpi_configure_connection': {
+        const sessionId = extra.sessionId;
+        if (!sessionId) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            'glpi_configure_connection requires a stateful session (Streamable HTTP). ' +
+              'On stdio, configure via GLPI_* environment variables instead.'
+          );
+        }
+        const raw = connectionSchema.parse(args);
+        const config = buildClientConfig(raw);
+        const candidate = new GlpiClient(config);
+        try {
+          await candidate.initSession();
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `Connection failed: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+        await sessionManager.remove(sessionId);
+        sessionManager.set(sessionId, candidate);
+        return text({
+          ok: true,
+          message: 'GLPI connection configured for this session.',
+          url: config.url,
+          auth_method: config.authMethod ?? 'password',
+        });
+      }
+
+      case 'glpi_connection_status': {
+        return text(sessionManager.status(extra.sessionId));
+      }
+
       // ==== TICKETS — read ====
       case 'glpi_list_tickets': {
         const validated = listArgsSchema.parse(args);
@@ -1885,8 +2029,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
   ],
 }));
 
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
   const { uri } = request.params;
+  const client = sessionManager.get(extra.sessionId);
   try {
     switch (uri) {
       case 'glpi://tickets/open': {
@@ -1941,28 +2086,42 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
 async function main() {
   try {
-    const config = getConfig();
-    client = new GlpiClient(config);
+    const config = tryGetConfig();
+    const ttlMs = sessionTtlMs();
 
-    // Try to open the session eagerly, but don't die if GLPI is momentarily
-    // unreachable: the HTTP layer re-authenticates lazily on first request.
-    try {
-      await client.initSession();
-      console.error('GLPI session initialized');
-    } catch (error) {
+    if (config) {
+      client = new GlpiClient(config);
+      sessionManager = new SessionManager({ defaultClient: client, ttlMs });
+
+      // Try to open the session eagerly, but don't die if GLPI is momentarily
+      // unreachable: the HTTP layer re-authenticates lazily on first request.
+      try {
+        await client.initSession();
+        console.error('GLPI session initialized');
+      } catch (error) {
+        console.error(
+          `Warning: could not reach GLPI at startup (${error instanceof Error ? error.message : error}). ` +
+          'The session will be established on the first request.'
+        );
+      }
+    } else {
+      sessionManager = new SessionManager({ ttlMs });
       console.error(
-        `Warning: could not reach GLPI at startup (${error instanceof Error ? error.message : error}). ` +
-        'The session will be established on the first request.'
+        'No GLPI_URL configured — multi-tenant mode. ' +
+          'Clients configure per session via glpi_configure_connection.'
       );
     }
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error('MCP GLPI Server v3.0 running on stdio');
+    const evictionTimer = setInterval(
+      () => sessionManager.evictExpired(),
+      Math.max(Math.floor(ttlMs / 2), 60_000)
+    );
+    evictionTimer.unref?.();
 
     const shutdown = async () => {
+      clearInterval(evictionTimer);
       try {
-        await client.killSession();
+        await sessionManager.close();
       } catch (error) {
         console.error('Warning: killSession failed during shutdown:', error instanceof Error ? error.message : error);
       }
@@ -1970,6 +2129,15 @@ async function main() {
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
+
+    if (process.env.MCP_TRANSPORT === 'http') {
+      await startHttpServer(server, sessionManager);
+      return;
+    }
+
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error('MCP GLPI Server v3.4.0 running on stdio');
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
