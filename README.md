@@ -31,10 +31,13 @@ README documents what's exposed today.
   explicit signals before acting.
 - **Runtime input validation** (zod) on ticket tools — clear `InvalidParams`
   errors instead of downstream GLPI failures.
-- **86 MCP tools**: covering tickets, problems, changes, assets (computers,
+- **Hosted / multi-tenant**: Streamable HTTP transport (`MCP_TRANSPORT=http`),
+  one GLPI connection per MCP session via `glpi_configure_connection`, with
+  in-memory credentials and idle-timeout eviction.
+- **88 MCP tools**: covering tickets, problems, changes, assets (computers,
   software, network equipment, printers, monitors, phones), knowledge base,
   contracts, suppliers, locations, projects, users, groups, categories,
-  entities, documents, search, and statistics.
+  entities, documents, search, statistics, and connection management.
 - **Task lifecycle management** (v3.3): `glpi_update_task` and `glpi_delete_task`
   tools for editing and removing ticket tasks, backed by the timeline API.
 
@@ -82,6 +85,68 @@ v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
   }
 }
 ```
+
+## Hosted deployment (Streamable HTTP / multi-tenant)
+
+Beyond stdio, the server can run as a **Streamable HTTP** endpoint so any
+MCP-compatible client connects over the network (e.g. `https://glpi.ai.br/mcp`).
+
+Two operating modes:
+
+- **Single-tenant** — set `GLPI_URL` (+ auth env vars) as usual; every session
+  uses that one GLPI instance.
+- **Multi-tenant** — leave `GLPI_URL` **unset**; each client configures its own
+  GLPI connection for its session by calling `glpi_configure_connection`.
+  Credentials live in memory only, are never logged, and are revoked when the
+  session closes (DELETE) or expires.
+
+### HTTP server environment variables
+
+| Env var | Default | Description |
+|---|---|---|
+| `MCP_TRANSPORT` | `stdio` | Set to `http` to serve Streamable HTTP |
+| `HOST` | `0.0.0.0` | Bind address |
+| `PORT` | `3000` | HTTP port |
+| `MCP_PATH` | `/mcp` | MCP endpoint path |
+| `SESSION_TTL_MS` | `86400000` | Session idle TTL in ms before its GLPI client is evicted |
+
+### Run locally
+
+```bash
+MCP_TRANSPORT=http PORT=3000 bun run start       # compiled dist/
+# or, without GLPI_URL: multi-tenant mode
+```
+
+Health/liveness: `GET /health` and `GET /` return `{"ok":true,...}`.
+
+### Connect a client
+
+Claude Desktop / Claude Code / Cline (streamable-http):
+
+```json
+{
+  "mcpServers": {
+    "glpi": {
+      "type": "streamable-http",
+      "url": "https://glpi.ai.br/mcp"
+    }
+  }
+}
+```
+
+In multi-tenant mode the first call should be:
+
+1. `glpi_connection_status` — is a GLPI connection configured?
+2. `glpi_configure_connection` — supply `url`, `auth_method`, and the matching
+   credentials (`username`/`password`, `client_id`/`client_secret`, or
+   `access_token`).
+3. Use any of the 88+ tools normally.
+
+### Reverse proxy notes
+
+If the server sits behind a proxy (Caddy/nginx), forward `MCP_PATH` with **SSE
+buffering disabled** and propagate `Host` / `X-Forwarded-*` headers. The
+streamable-http GET endpoint is an SSE stream and must not be buffered.
 
 ## Tool catalogue
 
@@ -157,6 +222,8 @@ resolved dynamically — no longer hard-coded). Projects also support
 
 | Tool | Description |
 |---|---|
+| `glpi_configure_connection` | Configure the GLPI connection for this session (multi-tenant mode) |
+| `glpi_connection_status` | Whether this session has a GLPI connection configured |
 | `glpi_search_v2` | Multi-criteria search (`criteria[]`, `forcedisplay`, `fetch_all`, ...) |
 | `glpi_count` | Cheap totalcount probe with criteria |
 | `glpi_list_search_options` | Catalogue of searchable fields for an itemtype |
@@ -277,6 +344,14 @@ cp .env.example .env   # fill in your GLPI credentials
 bun run build && bun start
 ```
 
+Run as a hosted Streamable HTTP server (multi-tenant — no GLPI_URL needed):
+
+```bash
+bun run build && MCP_TRANSPORT=http PORT=3000 bun start
+# health:  curl http://localhost:3000/health
+# endpoint: http://localhost:3000/mcp
+```
+
 The smoke test reads credentials from env or `.env` (gitignored). Validated
 against GLPI 11 (French locale).
 
@@ -304,13 +379,13 @@ docker compose up -d
 
 ```bash
 # 1. Pull the image
-docker pull ghcr.io/eftechcombr/mcp-glpi:1.0
+docker pull ghcr.io/eftechcombr/mcp-glpi:latest
 
 # 2. Run the container with your .env file
 docker run -d --name mcp-glpi \
   --restart unless-stopped \
   --env-file .env \
-  ghcr.io/eftechcombr/mcp-glpi:1.0
+  ghcr.io/eftechcombr/mcp-glpi:latest
 ```
 
 The container runs as a non-root user (`bunuser:1001`) and reads all
@@ -351,7 +426,7 @@ Add the following entry to your `claude_desktop_config.json`:
         "-e", "GLPI_USERNAME=your_username",
         "-e", "GLPI_PASSWORD=your_password",
         "-e", "GLPI_CLIENT_ID=your_client_id",
-        "ghcr.io/eftechcombr/mcp-glpi:1.0"
+        "ghcr.io/eftechcombr/mcp-glpi:latest"
       ]
     }
   }
@@ -379,7 +454,7 @@ For many environment variables, use a file-based approach for clarity:
       "args": [
         "run", "-i", "--rm",
         "--env-file", "/absolute/path/to/.env",
-        "ghcr.io/eftechcombr/mcp-glpi:1.0"
+        "ghcr.io/eftechcombr/mcp-glpi:latest"
       ]
     }
   }
@@ -406,7 +481,7 @@ Configure the Docker container as the server process:
         "-e", "GLPI_USERNAME=your_username",
         "-e", "GLPI_PASSWORD=your_password",
         "-e", "GLPI_CLIENT_ID=your_client_id",
-        "ghcr.io/eftechcombr/mcp-glpi:1.0"
+        "ghcr.io/eftechcombr/mcp-glpi:latest"
       ]
     }
   }
@@ -426,7 +501,7 @@ You can pull a pre-built image from a registry instead of building locally:
 
 ```bash
 # Pull from GitHub Container Registry
-docker pull ghcr.io/eftechcombr/mcp-glpi:1.0
+docker pull ghcr.io/eftechcombr/mcp-glpi:latest
 
 # Run with your environment
 docker run -i --rm \
@@ -435,8 +510,27 @@ docker run -i --rm \
   -e GLPI_USERNAME="your_username" \
   -e GLPI_PASSWORD="your_password" \
   -e GLPI_CLIENT_ID="your_client_id" \
-  ghcr.io/eftechcombr/mcp-glpi:1.0
+  ghcr.io/eftechcombr/mcp-glpi:latest
 ```
+
+### Hosted / Streamable HTTP in Docker
+
+Run the same image as a public MCP endpoint (leave `GLPI_URL` unset for
+multi-tenant mode, where each client configures its own GLPI via
+`glpi_configure_connection`):
+
+```bash
+docker run -d --name mcp-glpi-http \
+  -p 3000:3000 \
+  -e MCP_TRANSPORT=http \
+  -e PORT=3000 \
+  -e SESSION_TTL_MS=86400000 \
+  ghcr.io/eftechcombr/mcp-glpi:latest
+```
+
+Connect clients to `http://localhost:3000/mcp` (or the public URL, e.g.
+`https://glpi.ai.br/mcp`) as a `streamable-http` MCP server. If the container
+runs behind a reverse proxy, disable SSE buffering on the `/mcp` path.
 
 ### Volume mounts
 
@@ -453,7 +547,7 @@ docker run -i --rm \
   -e GLPI_USERNAME="your_username" \
   -e GLPI_PASSWORD="your_password" \
   -e GLPI_CLIENT_ID="your_client_id" \
-  ghcr.io/eftechcombr/mcp-glpi:1.0
+  ghcr.io/eftechcombr/mcp-glpi:latest
 ```
 
 ### Viewing logs
