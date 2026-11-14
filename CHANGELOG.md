@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.5.0 — 2026-11-14
+
+### Changed
+
+- **GLPI 12 High-Level API v3.0 support (with v2.x compatibility)**: default
+  resource requests now target `/api.php/v3.0/` while preserving backward
+  compatibility with High-Level API `v2.x` (`v2.3`, `v2`, etc.).
+- **Added `GLPI_API_VERSION` environment variable** (and `api_version` option
+  on `glpi_configure_connection`) with validation/normalization via
+  `normalizeApiVersion()`, plus `apiVersion` reporting in
+  `glpi_connection_status`.
+- **Compatible itemtype routing**: updated `ITEMTYPE_PATH_MAP` for
+  `SoftwareLicense` (`Management/License`) and `Project` (`Project`) across both
+  v2.x and v3.0, and updated `scripts/smoke.ts` team checks for v3.0
+  `UserTeamMember` and v2.x `TeamMember` payloads.
+- **Session teardown**: `killSession()` clears the local bearer token without
+  calling an unsupported `/logout` route.
+
 ## 3.4.0 — 2026-08-14
 
 ### Added

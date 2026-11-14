@@ -350,7 +350,7 @@ function formatTicketSummary(t: any) {
 // ---------------------------------------------------------------------------
 
 const server = new Server(
-  { name: 'mcp-glpi', version: '3.4.0' },
+  { name: 'mcp-glpi', version: '3.5.0' },
   { capabilities: { tools: {}, resources: {} } }
 );
 
@@ -2164,7 +2164,7 @@ async function main() {
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('MCP GLPI Server v3.4.0 running on stdio');
+    console.error('MCP GLPI Server v3.5.0 running on stdio');
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);

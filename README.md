@@ -1,4 +1,4 @@
-# MCP Server for GLPI v3.4
+# MCP Server for GLPI v3.5
 
 A Model Context Protocol (MCP) server that exposes GLPI (IT Service
 Management) to AI assistants like Claude, Cline, and other MCP-compatible
