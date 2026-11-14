@@ -1,10 +1,12 @@
-# MCP Server for GLPI v3.3
+# MCP Server for GLPI v3.4
 
 A Model Context Protocol (MCP) server that exposes GLPI (IT Service
 Management) to AI assistants like Claude, Cline, and other MCP-compatible
 clients.
 
-v3 is a foundations-and-coverage overhaul on top of v2. See
+v3 is a foundations-and-coverage overhaul on top of v2. By default the client
+targets GLPI 12's High-Level API `v3.0` path while retaining full compatibility
+with `v2.x` (such as `v2.3` on GLPI 11 or GLPI 12) via `GLPI_API_VERSION`. See
 [CHANGELOG.md](./CHANGELOG.md) for the full list of changes; the rest of this
 README documents what's exposed today.
 
@@ -38,7 +40,7 @@ README documents what's exposed today.
   software, network equipment, printers, monitors, phones), knowledge base,
   contracts, suppliers, locations, projects, users, groups, categories,
   entities, documents, search, statistics, and connection management.
-- **Task lifecycle management** (v3.3): `glpi_update_task` and `glpi_delete_task`
+- **Task lifecycle management**: `glpi_update_task` and `glpi_delete_task`
   tools for editing and removing ticket tasks, backed by the timeline API.
 
 ## Configuration
@@ -51,6 +53,7 @@ v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
 | Env var | Required | Default | Description |
 |---|---|---|---|
 | `GLPI_URL` | yes | — | Base URL of the GLPI instance (no trailing slash) |
+| `GLPI_API_VERSION` | no | `3.0` | High-Level API version (`3.0`/`3` for GLPI 12+, `2.3`/`2` for GLPI 11 / v2 compatibility) |
 | `GLPI_AUTH_METHOD` | no | `password` | `password`, `client_credentials`, or `bearer` |
 | `GLPI_USERNAME` | yes* | — | Login (password grant) |
 | `GLPI_PASSWORD` | yes* | — | Password (password grant) |
@@ -140,7 +143,7 @@ In multi-tenant mode the first call should be:
 2. `glpi_configure_connection` — supply `url`, `auth_method`, and the matching
    credentials (`username`/`password`, `client_id`/`client_secret`, or
    `access_token`).
-3. Use any of the 88+ tools normally.
+3. Use any of the tools normally.
 
 ### Reverse proxy notes
 
@@ -352,8 +355,11 @@ bun run build && MCP_TRANSPORT=http PORT=3000 bun start
 # endpoint: http://localhost:3000/mcp
 ```
 
-The smoke test reads credentials from env or `.env` (gitignored). Validated
-against GLPI 11 (French locale).
+The smoke test reads credentials from env or `.env` (gitignored). By default
+resource requests target High-Level API `v3.0` (GLPI 12+); set
+`GLPI_API_VERSION=2.3` (or `2`) to pin v2 compatibility (e.g. GLPI 11). Run the
+smoke test against your GLPI instance to verify local permissions and data
+shape.
 
 ## Docker
 

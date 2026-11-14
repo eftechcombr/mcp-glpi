@@ -5,6 +5,7 @@ export interface SessionStatus {
   configured: boolean;
   authMethod?: string;
   url?: string;
+  apiVersion?: string;
 }
 
 interface SessionEntry {
@@ -71,18 +72,22 @@ export class SessionManager {
     if (sessionId) {
       const entry = this.entries.get(sessionId);
       if (entry) {
+        const cfg = entry.client.http.config;
         return {
           configured: true,
-          authMethod: entry.client.http.config.authMethod,
-          url: entry.client.http.config.url,
+          authMethod: cfg.authMethod,
+          url: cfg.url,
+          ...(cfg.apiVersion !== undefined ? { apiVersion: cfg.apiVersion } : {}),
         };
       }
     }
     if (this.defaultClient) {
+      const cfg = this.defaultClient.http.config;
       return {
         configured: true,
-        authMethod: this.defaultClient.http.config.authMethod,
-        url: this.defaultClient.http.config.url,
+        authMethod: cfg.authMethod,
+        url: cfg.url,
+        ...(cfg.apiVersion !== undefined ? { apiVersion: cfg.apiVersion } : {}),
       };
     }
     return { configured: false };

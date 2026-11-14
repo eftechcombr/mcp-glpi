@@ -27,7 +27,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { GlpiClient, GlpiConfig, ListOptions, VALID_ITEMTYPES } from './glpi-client.js';
-import { GlpiError } from './http.js';
+import { GlpiError, normalizeApiVersion } from './http.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
 import { SessionManager } from './sessions.js';
 import { startHttpServer } from './http-server.js';
@@ -164,8 +164,11 @@ function getConfig(): GlpiConfig {
     );
   }
 
+  const rawApiVersion = process.env.GLPI_API_VERSION?.trim();
+
   return {
     url,
+    apiVersion: rawApiVersion ? normalizeApiVersion(rawApiVersion) : undefined,
     authMethod,
     username: process.env.GLPI_USERNAME,
     password: process.env.GLPI_PASSWORD,
@@ -182,6 +185,7 @@ function getConfig(): GlpiConfig {
 
 const connectionSchema = z.object({
   url: z.string().url(),
+  api_version: z.string().optional(),
   auth_method: z.enum(['password', 'client_credentials', 'bearer']).default('password'),
   username: z.string().optional(),
   password: z.string().optional(),
@@ -200,8 +204,21 @@ const connectionSchema = z.object({
  * GlpiConfig. Never logs or echoes credentials.
  */
 function buildClientConfig(raw: z.infer<typeof connectionSchema>): GlpiConfig {
+  let apiVersion: string | undefined;
+  if (raw.api_version?.trim()) {
+    try {
+      apiVersion = normalizeApiVersion(raw.api_version);
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
   const config: GlpiConfig = {
     url: raw.url,
+    apiVersion,
     authMethod: raw.auth_method,
     username: raw.username,
     password: raw.password,
@@ -408,6 +425,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           url: { type: 'string', description: 'Base URL of the GLPI instance (no trailing slash)' },
+          api_version: {
+            type: 'string',
+            description: 'High-Level API version (default "3.0" for GLPI 12; use "2.3" or "2" for GLPI 11 / v2 compatibility)',
+          },
           auth_method: { type: 'string', enum: ['password', 'client_credentials', 'bearer'], description: 'Default password' },
           username: { type: 'string' },
           password: { type: 'string' },
@@ -1274,6 +1295,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           ok: true,
           message: 'GLPI connection configured for this session.',
           url: config.url,
+          api_version: candidate.http.config.apiVersion,
           auth_method: config.authMethod ?? 'password',
         });
       }
@@ -1957,7 +1979,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         validateItemtype(itemtype);
         const cat = await client.searchOptions.get(itemtype);
         if (!cat) {
-          return text({ itemtype, count: 0, options: [], note: 'listSearchOptions endpoint unavailable in GLPI v2.3.0' });
+          return text({
+            itemtype,
+            count: 0,
+            options: [],
+            note: `listSearchOptions endpoint unavailable in GLPI High-Level API v${client.http.config.apiVersion}`,
+          });
         }
         const entries = Array.from(cat.byId.values()).map((o) => ({
           id: o.id, name: o.name, uid: o.uid, table: o.table,

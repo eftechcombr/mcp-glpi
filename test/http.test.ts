@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'bun:test';
-import { GlpiHttp, GlpiError } from '../src/http.js';
+import { GlpiHttp, GlpiError, normalizeApiVersion, DEFAULT_API_VERSION } from '../src/http.js';
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -64,6 +64,78 @@ test('request() re-authenticates on 401 and retries once', async () => {
   assert.equal(result.data[0].id, 42);
   assert.equal(tokenCalls, 2, 'should have re-authenticated once');
   assert.equal(requestCalls, 2);
+});
+
+test('resource requests default to GLPI high-level API v3.0', async () => {
+  let requestUrl = '';
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    requestUrl = url;
+    return new Response(JSON.stringify([]), { status: 200 });
+  });
+
+  const http = makeHttp();
+  await http.request('Assets/Computer');
+  assert.equal(http.config.apiVersion, DEFAULT_API_VERSION);
+  assert.equal(new URL(requestUrl).pathname, '/api.php/v3.0/Assets/Computer');
+});
+
+test('resource requests honor explicit v2.x apiVersion for backward compatibility', async () => {
+  let requestUrl = '';
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    requestUrl = url;
+    return new Response(JSON.stringify([]), { status: 200 });
+  });
+
+  const http23 = makeHttp({ apiVersion: 'v2.3' });
+  await http23.request('Assets/Computer');
+  assert.equal(http23.config.apiVersion, '2.3');
+  assert.equal(new URL(requestUrl).pathname, '/api.php/v2.3/Assets/Computer');
+
+  const http2 = makeHttp({ apiVersion: '2' });
+  await http2.request('Assistance/Ticket');
+  assert.equal(http2.config.apiVersion, '2');
+  assert.equal(new URL(requestUrl).pathname, '/api.php/v2/Assistance/Ticket');
+});
+
+test('normalizeApiVersion validates and normalizes High-Level API versions', () => {
+  assert.equal(normalizeApiVersion(undefined), '3.0');
+  assert.equal(normalizeApiVersion(''), '3.0');
+  assert.equal(normalizeApiVersion('   '), '3.0');
+  assert.equal(normalizeApiVersion('v3.0'), '3.0');
+  assert.equal(normalizeApiVersion('V3.0.0'), '3.0.0');
+  assert.equal(normalizeApiVersion('2.3'), '2.3');
+  assert.equal(normalizeApiVersion('2'), '2');
+  assert.throws(() => normalizeApiVersion('1.0'), /Unsupported GLPI API version/);
+  assert.throws(() => normalizeApiVersion('3.0/../v1'), /Invalid GLPI API version/);
+});
+
+test('killSession clears the token without calling an unsupported logout route', async () => {
+  let calls = 0;
+  installFetch(async () => {
+    calls++;
+    return new Response(
+      JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+      { status: 200 }
+    );
+  });
+
+  const http = makeHttp();
+  await http.initSession();
+  await http.killSession();
+  assert.equal(calls, 1);
+  assert.equal(http.token, null);
 });
 
 test('5xx triggers retry with backoff', async () => {

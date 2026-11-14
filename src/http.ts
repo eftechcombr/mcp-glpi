@@ -4,6 +4,8 @@ export type GlpiAuthMethod = 'password' | 'client_credentials' | 'bearer';
 
 export interface GlpiHttpConfig {
   url: string;
+  /** High-level API version used for resource requests. */
+  apiVersion?: string;
   authMethod?: GlpiAuthMethod;
   username?: string;
   password?: string;
@@ -69,6 +71,32 @@ function debugLog(message: string): void {
   }
 }
 
+export const DEFAULT_API_VERSION = '3.0';
+
+/**
+ * Normalize and validate a GLPI High-Level API version string.
+ *
+ * Accepts values like "3.0", "3", "v3.0", "2.3", "2", "v2.3.0".
+ * Empty or undefined values resolve to DEFAULT_API_VERSION ("3.0").
+ */
+export function normalizeApiVersion(version?: string): string {
+  const trimmed = version?.trim();
+  if (!trimmed) return DEFAULT_API_VERSION;
+  const normalized = trimmed.replace(/^v/i, '');
+  if (!/^\d+(?:\.\d+){0,2}$/.test(normalized)) {
+    throw new Error(
+      `Invalid GLPI API version "${version}". Expected a High-Level API version like "3.0" or "2.3".`
+    );
+  }
+  const major = parseInt(normalized.split('.')[0], 10);
+  if (major < 2) {
+    throw new Error(
+      `Unsupported GLPI API version "${version}". Only High-Level API v2+ (e.g. "2.3", "3.0") is supported.`
+    );
+  }
+  return normalized;
+}
+
 export class GlpiHttp {
   readonly config: GlpiHttpConfig;
   private accessToken: string | null = null;
@@ -77,11 +105,13 @@ export class GlpiHttp {
   private sessionLock: Promise<void> | null = null;
 
   constructor(config: GlpiHttpConfig) {
+    const apiVersion = normalizeApiVersion(config.apiVersion);
     this.config = {
       maxRetries: 2,
       retryBaseDelayMs: 300,
       timeoutMs: 15000,
       ...config,
+      apiVersion,
       url: config.url.replace(/\/+$/, ''),
     };
   }
@@ -165,13 +195,10 @@ export class GlpiHttp {
   }
 
   /**
-   * Kill the current GLPI session.
+   * Clear the current bearer token.
    *
-   * Calls the GLPI logout endpoint to revoke the server-side session token,
-   * then clears the in-memory token reference.
-   *
-   * Note: The logout call is best-effort (does not throw on failure) so that
-   * server shutdown is not blocked by an unreachable GLPI.
+   * The high-level API does not expose a logout endpoint. Token expiration and
+   * server-side revocation remain GLPI's responsibility.
    */
   async killSession(): Promise<void> {
     const token = this.accessToken;
@@ -179,19 +206,7 @@ export class GlpiHttp {
     this.accessToken = null;
     this.tokenExpiresAt = 0;
 
-    // Best-effort server-side logout: revoke the token
-    if (token) {
-      try {
-        await this.fetchWithTimeout(`${this.config.url}/api.php/logout`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        debugLog('GLPI session terminated server-side');
-      } catch {
-        // Swallow — GLPI may be unreachable during shutdown
-        debugLog('Warning: could not terminate GLPI session server-side');
-      }
-    }
+    if (token) debugLog('GLPI bearer token cleared locally');
   }
 
   /**
@@ -285,7 +300,7 @@ export class GlpiHttp {
     }
 
     const queryString = this.buildQuery(options.query);
-    const fullUrl = `${this.config.url}/api.php/${path}${queryString ? '?' + queryString : ''}`;
+    const fullUrl = `${this.config.url}/api.php/v${this.config.apiVersion}/${path}${queryString ? '?' + queryString : ''}`;
 
     const init: RequestInit = { method, headers };
     if (options.json !== undefined) init.body = JSON.stringify(options.json);

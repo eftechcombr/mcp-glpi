@@ -9,6 +9,7 @@ services:
       - .env
     environment:
       - GLPI_URL=${GLPI_URL}
+      - GLPI_API_VERSION=${GLPI_API_VERSION:-3.0}
       - GLPI_AUTH_METHOD=${GLPI_AUTH_METHOD:-password}
       - GLPI_USERNAME=${GLPI_USERNAME}
       - GLPI_PASSWORD=${GLPI_PASSWORD}
@@ -32,6 +33,7 @@ services:
       - .env
     environment:
       - GLPI_URL=${GLPI_URL}
+      - GLPI_API_VERSION=${GLPI_API_VERSION:-3.0}
       - GLPI_AUTH_METHOD=${GLPI_AUTH_METHOD:-password}
       - GLPI_USERNAME=${GLPI_USERNAME}
       - GLPI_PASSWORD=${GLPI_PASSWORD}

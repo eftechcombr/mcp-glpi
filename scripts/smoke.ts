@@ -34,6 +34,7 @@ if (!url) {
 
 const client = new GlpiClient({
   url,
+  apiVersion: process.env.GLPI_API_VERSION?.trim() || undefined,
   authMethod: (process.env.GLPI_AUTH_METHOD ?? 'password') as any,
   username: process.env.GLPI_USERNAME,
   password: process.env.GLPI_PASSWORD,
@@ -71,7 +72,7 @@ async function check(name: string, fn: () => Promise<string | void>): Promise<bo
 
 // --- main -------------------------------------------------------------------
 async function main() {
-  console.log(`\nSmoke test against ${url} ${WRITE ? '(read + write cycle)' : '(read-only)'}\n`);
+  console.log(`\nSmoke test against ${url} (API v${client.http.config.apiVersion}) ${WRITE ? '(read + write cycle)' : '(read-only)'}\n`);
 
   // ---- session ----
   console.log('Session:');
@@ -94,13 +95,13 @@ async function main() {
   console.log('\nSearchOptions cache:');
   await check('searchOptions.get(Ticket)', async () => {
     const cat = await client.searchOptions.get('Ticket');
-    if (!cat) return 'not available in GLPI v2.3.0';
+    if (!cat) return `not available in GLPI API v${client.http.config.apiVersion}`;
     if (cat.byId.size < 10) throw new Error(`only ${cat.byId.size} options — suspicious`);
     return `${cat.byId.size} options`;
   });
   await check('resolveField(Ticket, "status")', async () => {
     const id = await client.searchOptions.resolveField('Ticket', 'status');
-    if (id === undefined) return 'not available in GLPI v2.3.0';
+    if (id === undefined) return `not available in GLPI API v${client.http.config.apiVersion}`;
     return `field_id ${id}`;
   });
 
@@ -206,7 +207,7 @@ async function main() {
           await client.assignTicket(testId!, { users_id: uid, type: 2 });
           const t = (await client.getTicket(testId!)) as any;
           const assigned = (t.team ?? []).some(
-            (m: any) => m.role === 'assigned' && m.id === uid
+            (m: any) => m.role === 'assigned' && (m.user?.id ?? m.id) === uid
           );
           return `assignee=${uid} reflected=${assigned}`;
         });
