@@ -250,7 +250,7 @@ export class GlpiSearch {
   }
 }
 
-const ITEMTYPE_PATH_MAP: Record<string, string> = {
+export const ITEMTYPE_PATH_MAP: Record<string, string> = {
   Ticket: 'Assistance/Ticket',
   Problem: 'Assistance/Problem',
   Change: 'Assistance/Change',
@@ -264,7 +264,7 @@ const ITEMTYPE_PATH_MAP: Record<string, string> = {
   Peripheral: 'Assets/Peripheral',
   NetworkEquipment: 'Assets/NetworkEquipment',
   Software: 'Assets/Software',
-  SoftwareLicense: 'Assets/SoftwareLicense',
+  SoftwareLicense: 'Management/License',
   Certificate: 'Assets/Certificate',
   Appliance: 'Assets/Appliance',
   Contract: 'Management/Contract',
@@ -275,7 +275,7 @@ const ITEMTYPE_PATH_MAP: Record<string, string> = {
   KnowbaseItem: 'Knowledgebase/Article',
   ITILCategory: 'Dropdowns/ITILCategory',
   Location: 'Dropdowns/Location',
-  Project: 'Project/Project',
+  Project: 'Project',
   ProjectTask: 'Project/Task',
   ITILFollowup: 'ITILFollowup',
   ITILSolution: 'ITILSolution',

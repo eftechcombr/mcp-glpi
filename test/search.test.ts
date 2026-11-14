@@ -128,3 +128,26 @@ test('resolveField prefers the own-table option on column-name collisions', asyn
 
   assert.equal(await cache.resolveField('Ticket', 'name'), 1);
 });
+
+test('search uses v3/v2 compatible paths for SoftwareLicense and Project', async () => {
+  const requestedPaths: string[] = [];
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    requestedPaths.push(new URL(url).pathname);
+    return new Response(JSON.stringify([]), { status: 200 });
+  });
+
+  const search = authedSearch();
+  await search.search('SoftwareLicense', { limit: 1 });
+  await search.search('Project', { limit: 1 });
+
+  assert.deepEqual(requestedPaths, [
+    '/api.php/v3.0/Management/License',
+    '/api.php/v3.0/Project',
+  ]);
+});

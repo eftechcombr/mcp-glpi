@@ -1,5 +1,5 @@
 import { GlpiHttp, GlpiHttpConfig } from './http.js';
-import { GlpiSearch, SearchCriterion } from './search.js';
+import { GlpiSearch, ITEMTYPE_PATH_MAP, SearchCriterion } from './search.js';
 import { SearchOptionsCache } from './search-options.js';
 
 export interface GlpiConfig extends GlpiHttpConfig {}
@@ -362,46 +362,8 @@ export interface GetOptions {
 
 /**
  * Known GLPI itemtypes and their API paths.
- * Used to prevent path traversal via unvalidated user input.
+ * Re-exported from search.ts to keep a single source of truth and prevent path traversal.
  */
-const ITEMTYPE_PATH_MAP: Record<string, string> = {
-  Ticket: 'Assistance/Ticket',
-  Problem: 'Assistance/Problem',
-  Change: 'Assistance/Change',
-  User: 'Administration/User',
-  Group: 'Administration/Group',
-  Entity: 'Administration/Entity',
-  Computer: 'Assets/Computer',
-  Monitor: 'Assets/Monitor',
-  Printer: 'Assets/Printer',
-  Phone: 'Assets/Phone',
-  Peripheral: 'Assets/Peripheral',
-  NetworkEquipment: 'Assets/NetworkEquipment',
-  Software: 'Assets/Software',
-  SoftwareLicense: 'Assets/SoftwareLicense',
-  Certificate: 'Assets/Certificate',
-  Appliance: 'Assets/Appliance',
-  Contract: 'Management/Contract',
-  Supplier: 'Management/Supplier',
-  Document: 'Management/Document',
-  Budget: 'Management/Budget',
-  Contact: 'Management/Contact',
-  KnowbaseItem: 'Knowledgebase/Article',
-  ITILCategory: 'Dropdowns/ITILCategory',
-  Location: 'Dropdowns/Location',
-  Project: 'Project/Project',
-  ProjectTask: 'Project/Task',
-  ITILFollowup: 'ITILFollowup',
-  ITILSolution: 'ITILSolution',
-  TicketTask: 'TicketTask',
-  TicketValidation: 'TicketValidation',
-  Document_Item: 'Document_Item',
-  Ticket_Ticket: 'Ticket_Ticket',
-  Group_User: 'Group_User',
-  TicketSatisfaction: 'TicketSatisfaction',
-  Ticket_User: 'Ticket_User',
-  Group_Ticket: 'Group_Ticket',
-};
 export { ITEMTYPE_PATH_MAP };
 
 /** Set of valid itemtype names for validation */

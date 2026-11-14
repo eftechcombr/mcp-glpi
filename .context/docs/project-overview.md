@@ -47,7 +47,7 @@ All public API symbols are listed in `codebase-map.json`. Major exports include:
 | Runtime | Bun ≥ 1.0 |
 | Language | TypeScript 5.3+ |
 | Protocol | Model Context Protocol (MCP) via `@modelcontextprotocol/sdk` |
-| API | GLPI REST API (`/api.php/`) — OAuth2 tested against GLPI 11 |
+| API | GLPI High-Level REST API (`/api.php/v3.0/` default, `v2.x` compatible via `GLPI_API_VERSION`) — OAuth2 |
 | Validation | Zod 3.22+ for input schema validation |
 | Test runner | Bun test (built-in) |
 | Linter | ESLint 10.6+ with `@typescript-eslint` |

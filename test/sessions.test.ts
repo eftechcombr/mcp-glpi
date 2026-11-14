@@ -42,11 +42,12 @@ test('set()/get() isolate clients per session', () => {
 test('status() reports configured sessions without secrets', () => {
   const sm = new SessionManager();
   assert.deepEqual(sm.status(), { configured: false });
-  sm.set('sess-a', fakeClient({ authMethod: 'bearer' }).impl as any);
+  sm.set('sess-a', fakeClient({ authMethod: 'bearer', apiVersion: '3.0' }).impl as any);
   const st = sm.status('sess-a');
   assert.equal(st.configured, true);
   assert.equal(st.authMethod, 'bearer');
   assert.equal(st.url, 'https://glpi.test');
+  assert.equal(st.apiVersion, '3.0');
   assert.ok(!('password' in st));
 });
 

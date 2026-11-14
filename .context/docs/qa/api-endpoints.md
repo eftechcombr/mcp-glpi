@@ -12,7 +12,9 @@ relevantFiles:
 
 ## Base URL
 
-All requests go to `<GLPI_URL>/api.php/<path>`.
+All requests go to `<GLPI_URL>/api.php/v<GLPI_API_VERSION>/<path>` (default `3.0`
+for GLPI 12+; set `GLPI_API_VERSION=2.3` or `2` for GLPI 11 / v2 compatibility).
+Token requests go to `<GLPI_URL>/api.php/token`.
 
 ## Endpoints used
 
@@ -38,7 +40,8 @@ All requests go to `<GLPI_URL>/api.php/<path>`.
 | `/api.php/Management/Document` | GET | Document listing |
 | `/api.php/Dropdowns/Location` | GET / POST | Location CRUD |
 | `/api.php/Knowledgebase/Article` | GET / POST | KB article CRUD |
-| `/api.php/Project/Project` | GET / POST | Project CRUD |
+| `/api.php/v3.0/Management/License` | GET / POST | Software license CRUD |
+| `/api.php/v3.0/Project` | GET / POST | Project CRUD |
 
 ## Search (RSQL)
 
