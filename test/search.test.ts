@@ -217,7 +217,7 @@ test('search rejects RSQL injection in string field names before calling GLPI', 
   assert.deepEqual(paths, []);
 });
 
-test('contains values stay inside the quoted wildcard literal', async () => {
+test('contains uses ilike and escapes RSQL separators', async () => {
   let filter = '';
   installFetch(async (url) => {
     if (url.endsWith('/token')) {
@@ -235,7 +235,32 @@ test('contains values stay inside the quoted wildcard literal', async () => {
     criteria: [{ field: 'name', searchtype: 'contains', value: 'a;status==closed' }],
   });
 
-  assert.equal(filter, "name==*'a;status==closed'*");
+  assert.equal(filter, 'name=ilike=*a\\;status\\=\\=closed*');
+});
+
+test('contains does not quote values containing spaces', async () => {
+  const filters: string[] = [];
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    filters.push(new URL(url).searchParams.get('filter') ?? '');
+    return new Response('[]', { status: 200 });
+  });
+
+  const search = authedSearch();
+  await search.search('Ticket', {
+    criteria: [{ field: 'name', searchtype: 'contains', value: 'printer offline' }],
+  });
+  await search.search('Ticket', {
+    criteria: [{ field: 'name', searchtype: 'notcontains', value: 'printer offline' }],
+  });
+
+  assert.equal(filters[0], 'name=ilike=*printer offline*');
+  assert.equal(filters[1], 'name=notilike=*printer offline*');
 });
 
 test('search fails closed on unresolved fields and unknown operators', async () => {
@@ -294,5 +319,5 @@ test('wildcard characters in user values are escaped', async () => {
   });
 
   assert.equal(filters[0], "name=='a\\*b'");
-  assert.equal(filters[1], "name==*'a\\*b'*");
+  assert.equal(filters[1], 'name=ilike=*a\\*b*');
 });

@@ -46,6 +46,14 @@
 
 ### Fixed
 
+- **`contains` / `notcontains` search on GLPI v3**: these search types now emit
+  `=ilike=*value*` / `=notilike=*value*` instead of `==*value*` / `!=*value*`.
+  GLPI treats `*` in `==` as a literal character, so the old filter matched
+  nothing (`name==*teste*` returned 0 rows while `name=ilike=*teste*` returned
+  the expected matches). Wildcard values are no longer single-quoted, because
+  GLPI treats quotes inside a wildcard as literal characters; RSQL separators
+  are backslash-escaped instead. Matching is now case-insensitive, matching the
+  legacy GLPI search UI.
 - **Multiple HTTP sessions per process**: the Streamable HTTP transport now
   creates one server + transport per session instead of sharing a single
   transport. Concurrent `initialize` calls succeed with distinct session ids,

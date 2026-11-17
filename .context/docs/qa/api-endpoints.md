@@ -83,8 +83,8 @@ GLPI High-Level API search uses **RSQL** in the `filter` query parameter:
 | `notequals` | `prop!=value` |
 | `lessthan` | `prop=lt=value` |
 | `morethan` | `prop=gt=value` |
-| `contains` | `prop==*value*` |
-| `notcontains` | `prop!=*value*` |
+| `contains` | `prop=ilike=*value*` |
+| `notcontains` | `prop=notilike=*value*` |
 | `under` | `prop==value` |
 | `notunder` | `prop!=value` |
 | `empty` | `prop==''` |
@@ -92,8 +92,13 @@ GLPI High-Level API search uses **RSQL** in the `filter` query parameter:
 
 Criteria are linked with `;` (AND) and `,` (OR). `AND NOT` / `OR NOT` are
 emitted as `;not(...)` / `,not(...)`. Values containing RSQL metacharacters
-are single-quoted, with backslashes and `*` escaped; `contains`/`notcontains`
-values cannot widen their wildcard match.
+are single-quoted, with backslashes and `*` escaped.
+
+`contains` / `notcontains` use `ilike` / `notilike`, because GLPI treats `*` in
+`==` as a literal character (so `name==*foo*` matches nothing). Inside the
+wildcard, quotes are literal — `=ilike=*'foo'*` never matches — so those values
+are not quoted; `\ * ; , ( ) = ! < >` are backslash-escaped instead. `ilike` is
+case-insensitive, matching the legacy GLPI search behaviour.
 
 Field references may be numeric ids (resolved through `SearchOptionsCache`),
 friendly names, or raw column names. Field names must match
