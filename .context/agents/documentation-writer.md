@@ -39,8 +39,8 @@ The documentation writer agent creates and maintains documentation for mcp-glpi.
 
 ## Key Symbols for This Agent
 
-- Tool definitions in `src/index.ts:300-1068` — All tool names, descriptions, input schemas
-- `GlpiConfig` (`src/glpi-client.ts:25`) — Configuration interface matching env vars
+- Tool definitions in `src/index.ts:410-2010` — All tool names, descriptions, input schemas
+- `GlpiConfig` (`src/glpi-client.ts:5`) — Configuration interface matching env vars
 
 ## Documentation Touchpoints
 

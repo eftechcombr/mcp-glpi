@@ -5,9 +5,10 @@ Quality is maintained through unit tests, integration-style tests (mocked fetch)
 ## Test Types
 
 - **Unit/Integration**: Bun's built-in test runner (`bun test`), files in `test/` using `describe`/`it`/`expect` or `node:assert`. Tests use mocked `fetch` to simulate GLPI API responses.
-  - `test/http.test.ts` — HTTP layer: session init, re-auth on 401, retry on 5xx, error parsing, timeout handling, RSQL escaping.
-  - `test/search.test.ts` — Search engine: single page, fetch_all, count probes, criteria building, forcedisplay, RSQL filter formatting.
-- **Smoke/Integration**: `scripts/smoke.ts` — manual smoke test that connects to a real GLPI instance. Requires `GLPI_*` env vars.
+  - `test/http.test.ts` — HTTP layer: session init, re-auth on 401, retry on 5xx/429/network errors, `Retry-After`, error parsing, timeout handling, API-version normalization, token teardown.
+  - `test/search.test.ts` — Search engine: pagination, count probes, criteria building, forcedisplay, RSQL filter formatting, localized field resolution, itemtype path mapping.
+  - `test/sessions.test.ts` — Session manager: per-session isolation, default-client fallback, status reporting, idle eviction, teardown/revocation.
+- **Smoke/Integration**: `scripts/smoke.ts` — manual smoke test that connects to a real GLPI instance. Requires `GLPI_*` env vars. Defaults to High-Level API `v3.0`; set `GLPI_API_VERSION=2.3` (or `2`) for v2 compatibility.
 
 ## Running Tests
 
@@ -20,6 +21,7 @@ bun test --watch
 
 # Run a single test file
 bun test test/http.test.ts
+bun test test/sessions.test.ts
 
 # Smoke test against live GLPI
 bun run smoke

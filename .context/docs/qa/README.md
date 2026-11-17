@@ -2,7 +2,7 @@
 
 Project type: **library**
 
-Generated: 2026-07-09T23:58:35.848Z
+Generated: 2026-11-17T00:00:00.000Z
 
 ## Getting-started
 

@@ -13,10 +13,11 @@ Welcome to the mcp-glpi knowledge base. Start with the project overview, then di
 
 | Path | Description |
 |---|---|
-| `src/` | TypeScript source (5 files): MCP server, HTTP layer, search engine, field cache, domain client |
-| `test/` | Test files (2): HTTP layer tests + search engine tests |
+| `src/` | TypeScript source (7 files): MCP server, HTTP layer, search engine, field cache, domain client, session manager, Streamable HTTP transport |
+| `test/` | Test files (3): HTTP layer, search engine, and session manager |
 | `scripts/` | `smoke.ts` — manual integration smoke test |
 | `dist/` | Compiled CommonJS output |
+| `.github/workflows/` | Docker image publish workflow |
 | `README.md` | Project README with tool catalogue and configuration docs |
 | `AGENTS.md` | Agent collaboration conventions |
 

@@ -20,4 +20,4 @@ This directory contains ready-to-customize playbooks for AI agents collaborating
 ## Related Resources
 - [Documentation Index](../docs/README.md)
 - [Agent Knowledge Base](../../AGENTS.md)
-- [Contributor Guidelines](../../CONTRIBUTING.md)
+- [Contributor Guidelines](../../AGENTS.md)
