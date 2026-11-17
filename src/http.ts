@@ -97,6 +97,56 @@ export function normalizeApiVersion(version?: string): string {
   return normalized;
 }
 
+/**
+ * Validate and normalize a GLPI base URL.
+ *
+ * Only `http:`/`https:` are accepted. Credentials, query strings, and
+ * fragments are rejected: the base URL is concatenated with API paths, so a
+ * `#` or `?` would let a caller redirect requests to an arbitrary target
+ * (including `file:` URLs when combined with a scheme like `file:///etc/passwd#`).
+ */
+export function normalizeGlpiUrl(rawUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid GLPI URL: ${JSON.stringify(rawUrl)}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `Unsupported GLPI URL scheme "${parsed.protocol}" — only http and https are allowed.`
+    );
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('GLPI URL must not embed credentials.');
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error('GLPI URL must not contain a query string or fragment.');
+  }
+  const path = parsed.pathname.replace(/\/+$/, '');
+  return `${parsed.origin}${path}`;
+}
+
+/**
+ * Reject API path segments that could escape the configured GLPI base path.
+ *
+ * Paths are built by callers from itemtype names and ids; validating here is a
+ * defence-in-depth check so a non-numeric id cannot traverse to another
+ * endpoint (WHATWG URL normalization collapses `..` segments before sending).
+ */
+export function assertSafeApiPath(path: string): void {
+  const unsafe =
+    !path ||
+    path.startsWith('/') ||
+    path.includes('\\') ||
+    path.includes('?') ||
+    path.includes('#') ||
+    path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..');
+  if (unsafe) {
+    throw new Error(`Invalid GLPI API path: ${JSON.stringify(path)}`);
+  }
+}
+
 export class GlpiHttp {
   readonly config: GlpiHttpConfig;
   private accessToken: string | null = null;
@@ -112,7 +162,7 @@ export class GlpiHttp {
       timeoutMs: 15000,
       ...config,
       apiVersion,
-      url: config.url.replace(/\/+$/, ''),
+      url: normalizeGlpiUrl(config.url),
     };
   }
 
@@ -276,6 +326,8 @@ export class GlpiHttp {
     options: RequestOptions = {}
   ): Promise<RequestResult<T>> {
     const method = options.method ?? 'GET';
+
+    assertSafeApiPath(path);
 
     await this.ensureSession();
 

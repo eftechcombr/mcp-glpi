@@ -46,6 +46,15 @@ export interface SearchResponse<T = Record<string, unknown>> {
 
 const DEFAULT_PAGE = 100;
 const DEFAULT_MAX_ROWS = 1000;
+/** Hard ceiling on rows returned by a single page request. */
+export const MAX_PAGE_SIZE = 1000;
+/** Hard ceiling on rows collected by one `fetch_all` call. */
+export const MAX_FETCH_ROWS = 5000;
+
+function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.min(Math.max(n, min), max);
+}
 
 const RSQL_LINK_MAP: Record<string, string> = {
   'AND': ';',
@@ -112,8 +121,8 @@ export class GlpiSearch {
   ): Promise<SearchResponse<T>> {
     if (options.fetchAll) return this.fetchAll<T>(itemtype, options);
 
-    const start = options.start ?? 0;
-    const limit = options.limit ?? DEFAULT_PAGE;
+    const start = clampInt(options.start, 0, Number.MAX_SAFE_INTEGER, 0);
+    const limit = clampInt(options.limit, 1, MAX_PAGE_SIZE, DEFAULT_PAGE);
     return this.fetchPage<T>(itemtype, options, start, limit);
   }
 
@@ -174,9 +183,10 @@ export class GlpiSearch {
     itemtype: string,
     options: SearchOptions
   ): Promise<SearchResponse<T>> {
-    const maxRows = options.maxRows ?? DEFAULT_MAX_ROWS;
-    const pageSize = options.limit ?? DEFAULT_PAGE;
-    let cursor = options.start ?? 0;
+    const maxRows = clampInt(options.maxRows, 1, MAX_FETCH_ROWS, DEFAULT_MAX_ROWS);
+    const pageSize = clampInt(options.limit, 1, MAX_PAGE_SIZE, DEFAULT_PAGE);
+    const start = clampInt(options.start, 0, Number.MAX_SAFE_INTEGER, 0);
+    let cursor = start;
     const collected: T[] = [];
     let totalcount = 0;
     let contentRange: string | undefined;
@@ -201,7 +211,7 @@ export class GlpiSearch {
       itemtype,
       totalcount,
       count: collected.length,
-      start: options.start ?? 0,
+      start,
       data: collected,
       contentRange,
     };

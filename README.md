@@ -18,6 +18,7 @@ README documents what's exposed today.
   app_token/user_token auth is **not** supported in v3).
 - **Real search**: multi-criteria RSQL filter with `AND` / `OR` / `AND NOT` /
   `OR NOT`, `forcedisplay`, pagination, `fetch_all`, dedicated count probe.
+  Page size is capped at 1000 rows and `fetch_all` at 5000 rows per call.
 - **Dynamic field mapping**: `/listSearchOptions/{itemtype}` is cached (1-hour
   TTL) so `field_id` ↔ name translations stay valid across GLPI versions.
 - **High-level reporting**: `glpi_search_tickets` accepts friendly params,
@@ -100,27 +101,43 @@ Two operating modes:
   uses that one GLPI instance.
 - **Multi-tenant** — leave `GLPI_URL` **unset**; each client configures its own
   GLPI connection for its session by calling `glpi_configure_connection`.
-  Credentials live in memory only, are never logged, and are revoked when the
-  session closes (DELETE) or expires.
+  Credentials live in memory only, are never logged, and the in-memory token
+  is cleared when the session closes (DELETE) or expires (GLPI-side token
+  expiry still governs the token's lifetime).
+- **Isolated sessions** — every MCP session gets its own server instance and
+  transport, so clients can initialize concurrently and closing one session
+  does not disturb the others. Concurrent sessions are capped by
+  `MCP_MAX_SESSIONS`.
+
+> **Security:** the HTTP endpoint has no user directory of its own. Set
+> `MCP_AUTH_TOKEN` so every request to `MCP_PATH` must send
+> `Authorization: Bearer <token>`, and terminate TLS at a reverse proxy. The
+> server binds to `127.0.0.1` by default and **refuses to start** on a
+> non-loopback address without a token unless you explicitly set
+> `MCP_ALLOW_UNAUTHENTICATED=true`.
 
 ### HTTP server environment variables
 
 | Env var | Default | Description |
 |---|---|---|
 | `MCP_TRANSPORT` | `stdio` | Set to `http` to serve Streamable HTTP |
-| `HOST` | `0.0.0.0` | Bind address |
-| `PORT` | `3000` | HTTP port |
+| `HOST` | `127.0.0.1` | Bind address; use `0.0.0.0` in containers |
+| `PORT` | `3000` | HTTP port (`MCP_PORT` is accepted as a fallback) |
 | `MCP_PATH` | `/mcp` | MCP endpoint path |
+| `MCP_AUTH_TOKEN` | — | Require `Authorization: Bearer <token>` on the MCP endpoint |
+| `MCP_ALLOW_UNAUTHENTICATED` | `false` | Allow a non-loopback bind without a token (not recommended) |
+| `MCP_MAX_SESSIONS` | `100` | Max concurrent MCP sessions before new initializes get `503` |
 | `SESSION_TTL_MS` | `86400000` | Session idle TTL in ms before its GLPI client is evicted |
 
 ### Run locally
 
 ```bash
-MCP_TRANSPORT=http PORT=3000 bun run start       # compiled dist/
+MCP_TRANSPORT=http PORT=3000 MCP_AUTH_TOKEN=change-me bun run start
 # or, without GLPI_URL: multi-tenant mode
 ```
 
-Health/liveness: `GET /health` and `GET /` return `{"ok":true,...}`.
+Health/liveness: `GET /health` and `GET /` return `{"ok":true,...}` (no auth,
+no sensitive data).
 
 ### Connect a client
 
@@ -131,7 +148,10 @@ Claude Desktop / Claude Code / Cline (streamable-http):
   "mcpServers": {
     "glpi": {
       "type": "streamable-http",
-      "url": "https://glpi.ai.br/mcp"
+      "url": "https://glpi.ai.br/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN>"
+      }
     }
   }
 }
@@ -148,8 +168,10 @@ In multi-tenant mode the first call should be:
 ### Reverse proxy notes
 
 If the server sits behind a proxy (Caddy/nginx), forward `MCP_PATH` with **SSE
-buffering disabled** and propagate `Host` / `X-Forwarded-*` headers. The
-streamable-http GET endpoint is an SSE stream and must not be buffered.
+buffering disabled**, propagate `Host` / `X-Forwarded-*` headers, terminate TLS
+there, and forward the `Authorization` header unchanged when `MCP_AUTH_TOKEN`
+is set. The streamable-http GET endpoint is an SSE stream and must not be
+buffered.
 
 ## Tool catalogue
 
@@ -196,9 +218,16 @@ streamable-http GET endpoint is an SSE stream and must not be buffered.
 
 ### Assets
 
-| Tool family | Notes |
+Every asset family exposes `list_*` and `get_*`; `get_*` accepts
+`with_softwares` / `with_networkports` / `with_connections` / `with_documents`
+where the underlying itemtype supports them. Write tools are currently limited
+to computers and software.
+
+| Asset family | Tools |
 |---|---|
-| Computer, Software, NetworkEquipment, Printer, Monitor, Phone | `list_*`, `get_*` (with `with_softwares`/`with_networkports`/`with_connections`/`with_documents`), plus `create`/`update`/`delete` symmetry |
+| Computer | `glpi_list_computers`, `glpi_get_computer`, `glpi_create_computer`, `glpi_update_computer`, `glpi_delete_computer` |
+| Software | `glpi_list_softwares`, `glpi_get_software`, `glpi_create_software` |
+| NetworkEquipment, Printer, Monitor, Phone | `glpi_list_*` / `glpi_get_*` (read-only) |
 
 ### Knowledge base, contracts, suppliers, locations, projects, documents
 
@@ -529,10 +558,17 @@ multi-tenant mode, where each client configures its own GLPI via
 docker run -d --name mcp-glpi-http \
   -p 3000:3000 \
   -e MCP_TRANSPORT=http \
+  -e HOST=0.0.0.0 \
   -e PORT=3000 \
+  -e MCP_AUTH_TOKEN="<random-token>" \
   -e SESSION_TTL_MS=86400000 \
   ghcr.io/eftechcombr/mcp-glpi:latest
 ```
+
+Clients must then send `Authorization: Bearer <random-token>`. Without
+`MCP_AUTH_TOKEN`, the container refuses to start because `HOST=0.0.0.0` is not
+loopback (override with `MCP_ALLOW_UNAUTHENTICATED=true` only on a trusted
+network).
 
 Connect clients to `http://localhost:3000/mcp` (or the public URL, e.g.
 `https://glpi.ai.br/mcp`) as a `streamable-http` MCP server. If the container

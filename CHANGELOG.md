@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **HTTP transport authentication**: the Streamable HTTP endpoint now accepts
+  `MCP_AUTH_TOKEN` and requires `Authorization: Bearer <token>` on `MCP_PATH`.
+  The server binds to `127.0.0.1` by default and refuses to start on a
+  non-loopback address without a token unless `MCP_ALLOW_UNAUTHENTICATED=true`
+  is set. Health endpoints remain unauthenticated.
+- **URL scheme allowlist**: `GLPI_URL` and `glpi_configure_connection` now only
+  accept `http`/`https` URLs and reject embedded credentials, query strings,
+  and fragments. This closes a `file://` / fragment trick that allowed reading
+  local files (including `/proc/self/environ`) through API requests.
+- **ID validation and safe API paths**: tool identifiers are validated as
+  positive integers and `GlpiHttp` rejects API paths containing `.`/`..`
+  segments, query strings, or fragments. This prevents using a crafted `id`
+  such as `1/../../../Administration/User/7` to reach a different GLPI endpoint.
+- **Pagination caps**: page size is clamped to 1000 rows, `fetch_all` to 5000
+  rows, and classic-REST `range` arguments must be `START-END` with a span of
+  at most 1000 rows, preventing oversized responses and upstream load.
+- **Bounded HTTP sessions**: `MCP_MAX_SESSIONS` (default 100) caps concurrent
+  MCP sessions, and idle transports are reaped with the session TTL.
+- **Dependency upgrade**: `@modelcontextprotocol/sdk` 1.32.2 (from 1.29.0) and
+  `zod` 4.6.6, plus an `@hono/node-server` 2.1.9 override, clearing every
+  high/critical `bun audit` advisory. One moderate advisory remains in
+  `minimatch`, pulled in only by the ESLint/TypeScript-ESLint dev toolchain.
+
+### Fixed
+
+- **Multiple HTTP sessions per process**: the Streamable HTTP transport now
+  creates one server + transport per session instead of sharing a single
+  transport. Concurrent `initialize` calls succeed with distinct session ids,
+  and `DELETE /mcp` no longer makes the endpoint unable to accept new sessions.
+
 ## 3.5.0 — 2026-11-14
 
 ### Changed

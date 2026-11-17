@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'bun:test';
-import { GlpiHttp, GlpiError, normalizeApiVersion, DEFAULT_API_VERSION } from '../src/http.js';
+import { GlpiHttp, GlpiError, normalizeApiVersion, normalizeGlpiUrl, assertSafeApiPath, DEFAULT_API_VERSION } from '../src/http.js';
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -263,4 +263,36 @@ test('error body ["CODE","message"] is parsed into GlpiError', async () => {
       return true;
     }
   );
+});
+
+test('normalizeGlpiUrl accepts http(s) and strips trailing slashes', () => {
+  assert.equal(normalizeGlpiUrl('https://glpi.example.com/'), 'https://glpi.example.com');
+  assert.equal(normalizeGlpiUrl('http://glpi.example.com/glpi/'), 'http://glpi.example.com/glpi');
+});
+
+test('normalizeGlpiUrl rejects non-http(s) schemes, credentials, queries, and fragments', () => {
+  for (const url of [
+    'file:///etc/passwd#',
+    'ftp://glpi.example.com',
+    'https://user:secret@glpi.example.com',
+    'https://glpi.example.com/?x=1',
+    'https://glpi.example.com/#x',
+  ]) {
+    assert.throws(() => normalizeGlpiUrl(url), undefined, url);
+  }
+});
+
+test('GlpiHttp rejects a file:// base URL', () => {
+  assert.throws(
+    () => new GlpiHttp({ url: 'file:///etc/passwd#', authMethod: 'bearer', accessToken: 'x' }),
+    /Unsupported GLPI URL scheme/
+  );
+});
+
+test('assertSafeApiPath blocks traversal and query/fragment injection', () => {
+  assert.throws(() => assertSafeApiPath('Assets/Computer/1/../../../Administration/User/7'));
+  assert.throws(() => assertSafeApiPath('Assistance/Ticket/1?force_purge=1'));
+  assert.throws(() => assertSafeApiPath('Assistance/Ticket/1#fragment'));
+  assert.throws(() => assertSafeApiPath('/Assistance/Ticket'));
+  assert.doesNotThrow(() => assertSafeApiPath('Assistance/Ticket/1/Timeline/Task'));
 });

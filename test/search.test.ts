@@ -151,3 +151,44 @@ test('search uses v3/v2 compatible paths for SoftwareLicense and Project', async
     '/api.php/v3.0/Project',
   ]);
 });
+
+test('search() clamps page size and negative offsets', async () => {
+  const captured: Array<{ start: string; limit: string }> = [];
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    const params = new URL(url).searchParams;
+    captured.push({ start: params.get('start') ?? '', limit: params.get('limit') ?? '' });
+    return new Response('[]', { status: 200 });
+  });
+
+  const search = authedSearch();
+  await search.search('Ticket', { start: -5, limit: 100000 });
+  assert.deepEqual(captured[0], { start: '0', limit: '1000' });
+});
+
+test('fetchAll() clamps maxRows and page size', async () => {
+  const limits: string[] = [];
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    const params = new URL(url).searchParams;
+    limits.push(params.get('limit') ?? '');
+    return new Response(JSON.stringify([{ id: 1 }]), { status: 200 });
+  });
+
+  const search = authedSearch();
+  await search.search('Ticket', { fetchAll: true, limit: 5000 });
+  assert.equal(limits[0], '1000');
+
+  const small = await search.search('Ticket', { fetchAll: true, maxRows: 0, limit: 10 });
+  assert.equal(small.count, 1);
+});

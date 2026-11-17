@@ -27,7 +27,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { GlpiClient, GlpiConfig, ListOptions, VALID_ITEMTYPES } from './glpi-client.js';
-import { GlpiError, normalizeApiVersion } from './http.js';
+import { GlpiError, normalizeApiVersion, normalizeGlpiUrl } from './http.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
 import { SessionManager } from './sessions.js';
 import { startHttpServer } from './http-server.js';
@@ -38,7 +38,7 @@ import { startHttpServer } from './http-server.js';
 
 const listArgsSchema = z.object({
   start: z.number().int().min(0).optional(),
-  limit: z.number().int().min(1).max(10000).optional(),
+  limit: z.number().int().min(1).max(1000).optional(),
   range: z.string().optional(),
   sort: z.string().optional(),
   order: z.enum(['ASC', 'DESC']).optional(),
@@ -66,7 +66,7 @@ const ticketSearchSchema = z.object({
   text_search: z.string().optional(),
   open_only: z.boolean().optional(),
   start: z.number().int().min(0).optional(),
-  limit: z.number().int().min(1).max(10000).optional(),
+  limit: z.number().int().min(1).max(1000).optional(),
 }).passthrough();
 
 // ---------------------------------------------------------------------------
@@ -216,8 +216,18 @@ function buildClientConfig(raw: z.infer<typeof connectionSchema>): GlpiConfig {
     }
   }
 
+  let url: string;
+  try {
+    url = normalizeGlpiUrl(raw.url);
+  } catch (error) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+
   const config: GlpiConfig = {
-    url: raw.url,
+    url,
     apiVersion,
     authMethod: raw.auth_method,
     username: raw.username,
@@ -257,11 +267,21 @@ function tryGetConfig(): GlpiConfig | null {
   return getConfig();
 }
 
+/** Hard ceiling on rows returned by one classic-REST list call. */
+const MAX_LIST_ROWS = 1000;
+
+/** Clamp a requested page size to `1..MAX_LIST_ROWS` (defaults to 50). */
+function pageLimit(value: unknown, fallback = 50): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.trunc(n), 1), MAX_LIST_ROWS);
+}
+
 /**
  * Parse common list-tool arguments into a ListOptions.
  *
  * Accepts (in order of precedence):
- *   - `range`: "START-END" string passed through as-is
+ *   - `range`: "START-END" string (validated and capped at MAX_LIST_ROWS)
  *   - `start` + `limit`: assembled into range
  *   - `limit` alone: range = "0-{limit-1}" (backward-compat with v2)
  */
@@ -270,10 +290,23 @@ function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
   if (!args) return { range: '0-49', expand_dropdowns: true };
 
   if (typeof args.range === 'string') {
-    opts.range = args.range;
+    const match = /^(\d+)-(\d+)$/.exec(args.range.trim());
+    if (!match) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'range must be "START-END" with non-negative integers'
+      );
+    }
+    const start = Number(match[1]);
+    let end = Number(match[2]);
+    if (end < start) {
+      throw new McpError(ErrorCode.InvalidParams, 'range end must be >= range start');
+    }
+    end = Math.min(end, start + MAX_LIST_ROWS - 1);
+    opts.range = `${start}-${end}`;
   } else if (args.start !== undefined || args.limit !== undefined) {
-    const start = (args.start as number) ?? 0;
-    const limit = (args.limit as number) ?? 50;
+    const start = Math.max(Math.trunc(Number(args.start) || 0), 0);
+    const limit = pageLimit(args.limit);
     opts.range = `${start}-${start + limit - 1}`;
   } else {
     opts.range = '0-49';
@@ -287,6 +320,27 @@ function parseListArgs(args: Record<string, unknown> | undefined): ListOptions {
   opts.expand_dropdowns =
     args.expand_dropdowns === false ? false : true;
   return opts;
+}
+
+/**
+ * Validate a numeric id before it is interpolated into a GLPI API path.
+ *
+ * Tool arguments are JSON, not TypeScript: without this check a caller can pass
+ * a string such as `"1/../../../Administration/User/7"` and have URL
+ * normalization redirect the request to a different endpoint.
+ */
+function requireId(value: unknown, name = 'id'): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new McpError(ErrorCode.InvalidParams, `${name} must be a positive integer`);
+  }
+  return n;
+}
+
+/** Validate an optional numeric id; returns undefined when omitted. */
+function optionalId(value: unknown, name = 'id'): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  return requireId(value, name);
 }
 
 /** Validate that an itemtype string is known, preventing path traversal. */
@@ -349,17 +403,30 @@ function formatTicketSummary(t: any) {
 // Server setup
 // ---------------------------------------------------------------------------
 
-const server = new Server(
-  { name: 'mcp-glpi', version: '3.5.0' },
-  { capabilities: { tools: {}, resources: {} } }
-);
-
 let client: GlpiClient;
 let sessionManager: SessionManager;
+
+/**
+ * Build a fresh MCP server with every handler registered.
+ *
+ * The Streamable HTTP transport creates one server + transport pair per client
+ * session (H2 fix), so registrations must be replayable rather than bound to a
+ * module-level singleton.
+ */
+function createServer(): Server {
+  const server = new Server(
+    { name: 'mcp-glpi', version: '3.5.0' },
+    { capabilities: { tools: {}, resources: {} } }
+  );
+  registerHandlers(server);
+  return server;
+}
 
 // ---------------------------------------------------------------------------
 // Tool registration
 // ---------------------------------------------------------------------------
+
+function registerHandlers(server: Server): void {
 
 const LIST_TOOL_COMMON_PROPS = {
   start: { type: 'number', description: 'Offset (default 0)' },
@@ -1339,8 +1406,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_get_ticket_timeline': {
-        const id = args.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const id = requireId(args.id);
         const [followups, tasks, solutions, validations] = await Promise.all([
           client.getTicketFollowups(id),
           client.getTicketTasks(id),
@@ -1400,28 +1466,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_get_ticket_followups': {
-        const id = args.ticket_id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        const id = requireId(args.ticket_id, 'ticket_id');
         return text(await client.getTicketFollowups(id));
       }
       case 'glpi_get_ticket_tasks': {
-        const id = args.ticket_id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        const id = requireId(args.ticket_id, 'ticket_id');
         return text(await client.getTicketTasks(id));
       }
       case 'glpi_get_ticket_solutions': {
-        const id = args.ticket_id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        const id = requireId(args.ticket_id, 'ticket_id');
         return text(await client.getTicketSolutions(id));
       }
       case 'glpi_get_ticket_validations': {
-        const id = args.ticket_id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        const id = requireId(args.ticket_id, 'ticket_id');
         return text(await client.getTicketValidations(id));
       }
       case 'glpi_get_ticket_documents': {
-        const id = args.ticket_id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        const id = requireId(args.ticket_id, 'ticket_id');
         return text(await client.getTicketDocuments(id));
       }
 
@@ -1449,8 +1510,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_update_ticket': {
-        const id = args.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const id = requireId(args.id);
         const updates: Record<string, unknown> = {};
         ['name', 'content', 'status', 'urgency', 'priority', 'impact', 'itilcategories_id'].forEach((k) => {
           if (args[k] !== undefined) updates[k] = args[k];
@@ -1460,14 +1520,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_delete_ticket': {
-        const id = args.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const id = requireId(args.id);
         await client.deleteTicket(id, args.force as boolean);
         return text({ success: true, id, purged: !!args.force });
       }
 
       case 'glpi_add_followup': {
-        const ticket_id = args.ticket_id as number;
+        const ticket_id = requireId(args.ticket_id, 'ticket_id');
         const content = args.content as string;
         if (!ticket_id || !content) throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content required');
         const result = await client.addTicketFollowup(ticket_id, content, args.is_private as boolean);
@@ -1475,7 +1534,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_add_task': {
-        const ticket_id = args.ticket_id as number;
+        const ticket_id = requireId(args.ticket_id, 'ticket_id');
         const content = args.content as string;
         if (!ticket_id || !content) throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content required');
         const result = await client.addTicketTask(ticket_id, content, {
@@ -1489,27 +1548,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_update_task': {
-        const id = args.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
+        const id = requireId(args.id);
         const updates: Record<string, unknown> = {};
         ['content', 'actiontime', 'is_private', 'state', 'users_id_tech', 'groups_id_tech'].forEach((k) => {
           if (args[k] !== undefined) updates[k] = args[k];
         });
-        const ticketId = args.ticket_id as number | undefined;
+        const ticketId = optionalId(args.ticket_id, 'ticket_id');
         await client.updateTicketTask(id, updates, ticketId);
         return text({ success: true, id });
       }
 
       case 'glpi_delete_task': {
-        const id = args.id as number;
-        if (!id) throw new McpError(ErrorCode.InvalidParams, 'id required');
-        const ticketId = args.ticket_id as number | undefined;
+        const id = requireId(args.id);
+        const ticketId = optionalId(args.ticket_id, 'ticket_id');
         await client.deleteTicketTask(id, args.force as boolean, ticketId);
         return text({ success: true, id, purged: !!args.force });
       }
 
       case 'glpi_add_solution': {
-        const ticket_id = args.ticket_id as number;
+        const ticket_id = requireId(args.ticket_id, 'ticket_id');
         const content = args.content as string;
         if (!ticket_id || !content) throw new McpError(ErrorCode.InvalidParams, 'ticket_id and content required');
         const result = await client.addTicketSolution(ticket_id, content, args.solutiontypes_id as number);
@@ -1517,10 +1574,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_assign_ticket': {
-        const ticket_id = args.ticket_id as number;
-        if (!ticket_id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
-        const user_id = args.user_id as number;
-        const group_id = args.group_id as number;
+        const ticket_id = requireId(args.ticket_id, 'ticket_id');
+        const user_id = optionalId(args.user_id, 'user_id');
+        const group_id = optionalId(args.group_id, 'group_id');
         if (!user_id && !group_id) {
           throw new McpError(ErrorCode.InvalidParams, 'user_id or group_id required');
         }
@@ -1533,16 +1589,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_link_tickets': {
-        const parent_id = args.parent_id as number;
-        const child_id = args.child_id as number;
+        const parent_id = requireId(args.parent_id, 'parent_id');
+        const child_id = requireId(args.child_id, 'child_id');
         if (!parent_id || !child_id) throw new McpError(ErrorCode.InvalidParams, 'parent_id and child_id required');
         const result = await client.linkTickets(parent_id, child_id, (args.link_type as number) ?? 1);
         return text({ success: true, link_id: result.id });
       }
 
       case 'glpi_add_ticket_validation': {
-        const ticket_id = args.ticket_id as number;
-        const users_id_validate = args.users_id_validate as number;
+        const ticket_id = requireId(args.ticket_id, 'ticket_id');
+        const users_id_validate = requireId(args.users_id_validate, 'users_id_validate');
         if (!ticket_id || !users_id_validate) {
           throw new McpError(ErrorCode.InvalidParams, 'ticket_id and users_id_validate required');
         }
@@ -1554,7 +1610,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_set_validation_status': {
-        const validation_id = args.validation_id as number;
+        const validation_id = requireId(args.validation_id, 'validation_id');
         const status = args.status as 2 | 3;
         if (!validation_id || (status !== 2 && status !== 3)) {
           throw new McpError(ErrorCode.InvalidParams, 'validation_id and status (2 or 3) required');
@@ -1568,8 +1624,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_attach_document_to_ticket': {
-        const ticket_id = args.ticket_id as number;
-        const document_id = args.document_id as number;
+        const ticket_id = requireId(args.ticket_id, 'ticket_id');
+        const document_id = requireId(args.document_id, 'document_id');
         if (!ticket_id || !document_id) {
           throw new McpError(ErrorCode.InvalidParams, 'ticket_id and document_id required');
         }
@@ -1578,8 +1634,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       }
 
       case 'glpi_get_ticket_satisfaction': {
-        const ticket_id = args.ticket_id as number;
-        if (!ticket_id) throw new McpError(ErrorCode.InvalidParams, 'ticket_id required');
+        const ticket_id = requireId(args.ticket_id, 'ticket_id');
         return text(await client.getTicketSatisfaction(ticket_id));
       }
 
@@ -1618,7 +1673,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         })));
       }
       case 'glpi_get_problem': {
-        const id = args.id as number;
+        const id = requireId(args.id);
         const p = await client.getProblem(id);
         return text({
           ...p,
@@ -1638,7 +1693,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         return text({ success: true, ...result });
       }
       case 'glpi_update_problem': {
-        const id = args.id as number;
+        const id = requireId(args.id);
         const updates: Record<string, unknown> = {};
         ['name', 'content', 'status', 'urgency'].forEach((k) => {
           if (args[k] !== undefined) updates[k] = args[k];
@@ -1657,7 +1712,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         })));
       }
       case 'glpi_get_change': {
-        const id = args.id as number;
+        const id = requireId(args.id);
         const c = await client.getChange(id);
         return text({
           ...c,
@@ -1677,7 +1732,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         return text({ success: true, ...result });
       }
       case 'glpi_update_change': {
-        const id = args.id as number;
+        const id = requireId(args.id);
         const updates: Record<string, unknown> = {};
         ['name', 'content', 'status'].forEach((k) => {
           if (args[k] !== undefined) updates[k] = args[k];
@@ -1690,7 +1745,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case 'glpi_list_computers':
         return text(await client.getComputers(parseListArgs(args)));
       case 'glpi_get_computer':
-        return text(await client.getComputer(args.id as number, {
+        return text(await client.getComputer(requireId(args.id), {
           with_softwares: args.with_softwares as boolean,
           with_connections: args.with_connections as boolean,
           with_networkports: args.with_networkports as boolean,
@@ -1699,51 +1754,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case 'glpi_create_computer':
         return text({ success: true, ...(await client.createComputer(args)) });
       case 'glpi_update_computer': {
-        const id = args.id as number;
+        const id = requireId(args.id);
         const updates = { ...args }; delete (updates as any).id;
         await client.updateComputer(id, updates as any);
         return text({ success: true, id });
       }
       case 'glpi_delete_computer':
-        await client.deleteComputer(args.id as number, args.force as boolean);
+        await client.deleteComputer(requireId(args.id), args.force as boolean);
         return text({ success: true, id: args.id, purged: !!args.force });
 
       case 'glpi_list_softwares':
         return text(await client.getSoftwares(parseListArgs(args)));
       case 'glpi_get_software':
-        return text(await client.getSoftware(args.id as number));
+        return text(await client.getSoftware(requireId(args.id)));
       case 'glpi_create_software':
         return text({ success: true, ...(await client.createSoftware(args)) });
 
       case 'glpi_list_network_equipments':
         return text(await client.getNetworkEquipments(parseListArgs(args)));
       case 'glpi_get_network_equipment':
-        return text(await client.getNetworkEquipment(args.id as number, {
+        return text(await client.getNetworkEquipment(requireId(args.id), {
           with_networkports: args.with_networkports as boolean,
         }));
 
       case 'glpi_list_printers':
         return text(await client.getPrinters(parseListArgs(args)));
       case 'glpi_get_printer':
-        return text(await client.getPrinter(args.id as number));
+        return text(await client.getPrinter(requireId(args.id)));
 
       case 'glpi_list_monitors':
         return text(await client.getMonitors(parseListArgs(args)));
       case 'glpi_get_monitor':
-        return text(await client.getMonitor(args.id as number));
+        return text(await client.getMonitor(requireId(args.id)));
 
       case 'glpi_list_phones':
         return text(await client.getPhones(parseListArgs(args)));
       case 'glpi_get_phone':
-        return text(await client.getPhone(args.id as number));
+        return text(await client.getPhone(requireId(args.id)));
 
       // ==== KB / CONTRACTS / SUPPLIERS / LOCATIONS / PROJECTS ====
       case 'glpi_list_knowbase':
         return text(await client.getKnowbaseItems(parseListArgs(args)));
       case 'glpi_get_knowbase_item':
-        return text(await client.getKnowbaseItem(args.id as number));
+        return text(await client.getKnowbaseItem(requireId(args.id)));
       case 'glpi_search_knowbase':
-        return text(await client.searchKnowbase(args.query as string, (args.limit as number) ?? 50));
+        return text(await client.searchKnowbase(args.query as string, pageLimit(args.limit)));
       case 'glpi_create_knowbase_item': {
         const result = await client.createKnowbaseItem({
           name: args.name as string,
@@ -1757,32 +1812,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case 'glpi_list_contracts':
         return text(await client.getContracts(parseListArgs(args)));
       case 'glpi_get_contract':
-        return text(await client.getContract(args.id as number));
+        return text(await client.getContract(requireId(args.id)));
       case 'glpi_create_contract':
         return text({ success: true, ...(await client.createContract(args)) });
 
       case 'glpi_list_suppliers':
         return text(await client.getSuppliers(parseListArgs(args)));
       case 'glpi_get_supplier':
-        return text(await client.getSupplier(args.id as number));
+        return text(await client.getSupplier(requireId(args.id)));
       case 'glpi_create_supplier':
         return text({ success: true, ...(await client.createSupplier(args)) });
 
       case 'glpi_list_locations':
         return text(await client.getLocations(parseListArgs(args)));
       case 'glpi_get_location':
-        return text(await client.getLocation(args.id as number));
+        return text(await client.getLocation(requireId(args.id)));
       case 'glpi_create_location':
         return text({ success: true, ...(await client.createLocation(args)) });
 
       case 'glpi_list_projects':
         return text(await client.getProjects(parseListArgs(args)));
       case 'glpi_get_project':
-        return text(await client.getProject(args.id as number));
+        return text(await client.getProject(requireId(args.id)));
       case 'glpi_create_project':
         return text({ success: true, ...(await client.createProject(args)) });
       case 'glpi_update_project': {
-        const id = args.id as number;
+        const id = requireId(args.id);
         const updates: Record<string, unknown> = {};
         ['name', 'content', 'percent_done', 'real_start_date', 'real_end_date'].forEach((k) => {
           if (args[k] !== undefined) updates[k] = args[k];
@@ -1798,7 +1853,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           is_active: args.active_only === false ? false : true,
         }));
       case 'glpi_get_user':
-        return text(await client.getUser(args.id as number));
+        return text(await client.getUser(requireId(args.id)));
       case 'glpi_search_user':
         return text(await client.getUserByName(args.name as string));
       case 'glpi_create_user':
@@ -1815,7 +1870,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case 'glpi_list_groups':
         return text(await client.getGroups(parseListArgs(args)));
       case 'glpi_get_group':
-        return text(await client.getGroup(args.id as number));
+        return text(await client.getGroup(requireId(args.id)));
       case 'glpi_create_group':
         return text({ success: true, ...(await client.createGroup({
           name: args.name as string,
@@ -1825,8 +1880,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         })) });
       case 'glpi_add_user_to_group':
         return text({ success: true, ...(await client.addUserToGroup(
-          args.user_id as number,
-          args.group_id as number,
+          requireId(args.user_id, 'user_id'),
+          requireId(args.group_id, 'group_id'),
           args.is_manager as boolean
         )) });
 
@@ -1835,11 +1890,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case 'glpi_list_entities':
         return text(await client.getEntities(parseListArgs(args)));
       case 'glpi_get_entity':
-        return text(await client.getEntity(args.id as number));
+        return text(await client.getEntity(requireId(args.id)));
       case 'glpi_list_documents':
         return text(await client.getDocuments(parseListArgs(args)));
       case 'glpi_get_document':
-        return text(await client.getDocument(args.id as number));
+        return text(await client.getDocument(requireId(args.id)));
 
       // ==== STATS ====
       case 'glpi_get_ticket_stats': {
@@ -2106,6 +2161,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
     );
   }
 });
+}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -2158,10 +2214,11 @@ async function main() {
     process.on('SIGTERM', shutdown);
 
     if (process.env.MCP_TRANSPORT === 'http') {
-      await startHttpServer(server, sessionManager);
+      await startHttpServer(createServer, sessionManager);
       return;
     }
 
+    const server = createServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error('MCP GLPI Server v3.5.0 running on stdio');
