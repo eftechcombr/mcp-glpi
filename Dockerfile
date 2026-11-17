@@ -1,7 +1,9 @@
 # =============================================================================
 # Stage 1: Build — compile TypeScript and run linter
 # =============================================================================
-FROM oven/bun:1-alpine AS builder
+# Pin the base image digest for reproducible builds and supply-chain safety.
+# Refresh with: docker buildx imagetools inspect oven/bun:1-alpine
+FROM oven/bun:1-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a AS builder
 WORKDIR /app
 
 # Install dependencies first (better layer caching)
@@ -18,7 +20,7 @@ RUN bun run lint && bun run build
 # =============================================================================
 # Stage 2: Runtime — minimal production image
 # =============================================================================
-FROM oven/bun:1-alpine AS runner
+FROM oven/bun:1-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a AS runner
 WORKDIR /app
 
 # Create non-root user for security

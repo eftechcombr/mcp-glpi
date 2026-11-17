@@ -115,6 +115,11 @@ Two operating modes:
 > server binds to `127.0.0.1` by default and **refuses to start** on a
 > non-loopback address without a token unless you explicitly set
 > `MCP_ALLOW_UNAUTHENTICATED=true`.
+>
+> Loopback binds also validate the `Host`/`Origin` headers (DNS-rebinding
+> protection); add extra names with `MCP_ALLOWED_HOSTS=glpi.example.com`.
+> Requests are rate-limited per session/IP (`MCP_RATE_LIMIT_PER_MINUTE`,
+> default 120/min) and the endpoint returns `429` when exceeded.
 
 ### HTTP server environment variables
 
@@ -126,6 +131,8 @@ Two operating modes:
 | `MCP_PATH` | `/mcp` | MCP endpoint path |
 | `MCP_AUTH_TOKEN` | — | Require `Authorization: Bearer <token>` on the MCP endpoint |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Allow a non-loopback bind without a token (not recommended) |
+| `MCP_ALLOWED_HOSTS` | — | Comma-separated extra `Host`/`Origin` values to accept (reverse proxies) |
+| `MCP_RATE_LIMIT_PER_MINUTE` | `120` | Request cap per session/IP; `0` disables the limiter |
 | `MCP_MAX_SESSIONS` | `100` | Max concurrent MCP sessions before new initializes get `503` |
 | `SESSION_TTL_MS` | `86400000` | Session idle TTL in ms before its GLPI client is evicted |
 
@@ -170,8 +177,9 @@ In multi-tenant mode the first call should be:
 If the server sits behind a proxy (Caddy/nginx), forward `MCP_PATH` with **SSE
 buffering disabled**, propagate `Host` / `X-Forwarded-*` headers, terminate TLS
 there, and forward the `Authorization` header unchanged when `MCP_AUTH_TOKEN`
-is set. The streamable-http GET endpoint is an SSE stream and must not be
-buffered.
+is set. When the server binds loopback behind the proxy, add the public
+hostname to `MCP_ALLOWED_HOSTS` so the `Host`/`Origin` check accepts it. The
+streamable-http GET endpoint is an SSE stream and must not be buffered.
 
 ## Tool catalogue
 

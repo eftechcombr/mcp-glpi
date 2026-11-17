@@ -32,11 +32,26 @@ function isAuthorized(req: Request, expectedToken: string): boolean {
   return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
-function jsonRpcError(status: number, code: number, message: string): Response {
-  return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }), {
+/** Strip the port (and IPv6 brackets) from a Host header or URL host. */
+function hostnameOf(value: string): string {
+  const v = value.trim().toLowerCase();
+  if (v.startsWith('[')) {
+    const end = v.indexOf(']');
+    return end === -1 ? v : v.slice(1, end);
+  }
+  const colon = v.lastIndexOf(':');
+  return colon === -1 ? v : v.slice(0, colon);
+}
+
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   });
+}
+
+function jsonRpcError(status: number, code: number, message: string): Response {
+  return jsonResponse(status, { jsonrpc: '2.0', error: { code, message }, id: null });
 }
 
 /**
@@ -70,6 +85,68 @@ export async function startHttpServer(
   const mcpPath = process.env.MCP_PATH ?? '/mcp';
   const basePath = mcpPath.startsWith('/') ? mcpPath : `/${mcpPath}`;
   const maxSessions = envInt('MCP_MAX_SESSIONS') ?? DEFAULT_MAX_SESSIONS;
+  const rateLimitPerMinute = envInt('MCP_RATE_LIMIT_PER_MINUTE') ?? 120;
+
+  // Host/Origin allowlist. DNS-rebinding protection matters most for loopback
+  // binds, where a malicious web page can target 127.0.0.1 through its own
+  // domain name. Extra names (for reverse proxies) go in MCP_ALLOWED_HOSTS.
+  const allowedHosts = new Set(
+    (process.env.MCP_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const enforceHostCheck = isLoopbackHost(host) || allowedHosts.size > 0;
+  const bindHostname = hostnameOf(host);
+  const loopbackNames = new Set(['localhost', '127.0.0.1', '::1']);
+
+  function isAllowedHost(hostHeader: string | null): boolean {
+    if (!hostHeader) return false;
+    const full = hostHeader.trim().toLowerCase();
+    if (allowedHosts.has(full)) return true;
+    const hostname = hostnameOf(full);
+    return (
+      allowedHosts.has(hostname) ||
+      loopbackNames.has(hostname) ||
+      hostname === bindHostname
+    );
+  }
+
+  function isAllowedOrigin(origin: string | null, hostHeader: string | null): boolean {
+    if (!origin) return true;
+    if (origin === 'null') return false;
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      return false;
+    }
+    const originHost = parsed.host.toLowerCase();
+    if (allowedHosts.has(originHost) || allowedHosts.has(parsed.hostname.toLowerCase())) {
+      return true;
+    }
+    return hostHeader !== null && originHost === hostHeader.trim().toLowerCase();
+  }
+
+  // Fixed-window limiter keyed by session id (or client address for requests
+  // that have not initialized a session yet).
+  const buckets = new Map<string, { count: number; resetAt: number }>();
+  function isRateLimited(key: string): boolean {
+    if (rateLimitPerMinute <= 0) return false;
+    const now = Date.now();
+    let bucket = buckets.get(key);
+    if (!bucket || now >= bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + 60_000 };
+      buckets.set(key, bucket);
+    }
+    bucket.count += 1;
+    if (buckets.size > 10_000) {
+      for (const [id, entry] of buckets) {
+        if (now >= entry.resetAt) buckets.delete(id);
+      }
+    }
+    return bucket.count > rateLimitPerMinute;
+  }
 
   if (!authToken && !isLoopbackHost(host) && !allowUnauthenticated) {
     throw new Error(
@@ -132,7 +209,7 @@ export async function startHttpServer(
   Bun.serve({
     hostname: host,
     port,
-    async fetch(req: Request): Promise<Response> {
+    async fetch(req: Request, bunServer): Promise<Response> {
       const url = new URL(req.url);
       if (url.pathname !== basePath) {
         if (url.pathname === '/' || url.pathname === '/health') {
@@ -151,6 +228,19 @@ export async function startHttpServer(
             'www-authenticate': 'Bearer realm="mcp-glpi"',
           },
         });
+      }
+
+      if (enforceHostCheck) {
+        const hostHeader = req.headers.get('host');
+        if (!isAllowedHost(hostHeader) || !isAllowedOrigin(req.headers.get('origin'), hostHeader)) {
+          return jsonResponse(403, { error: 'forbidden' });
+        }
+      }
+
+      const limiterKey =
+        req.headers.get('mcp-session-id') ?? bunServer.requestIP(req)?.address ?? 'unknown';
+      if (isRateLimited(limiterKey)) {
+        return jsonResponse(429, { error: 'too_many_requests' }, { 'retry-after': '60' });
       }
 
       const sessionId = req.headers.get('mcp-session-id') ?? undefined;

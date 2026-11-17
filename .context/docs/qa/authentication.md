@@ -38,6 +38,10 @@ gated separately from GLPI auth:
 - `HOST` defaults to `127.0.0.1`. Binding a non-loopback address without
   `MCP_AUTH_TOKEN` is refused at startup unless
   `MCP_ALLOW_UNAUTHENTICATED=true` (which logs a warning).
+- Loopback binds validate `Host` and `Origin` (DNS-rebinding/CSRF defence);
+  extra hostnames go in `MCP_ALLOWED_HOSTS`.
+- Requests are rate-limited per session/IP with
+  `MCP_RATE_LIMIT_PER_MINUTE` (default 120; `0` disables).
 - Each session gets its own `Server` + transport pair; `MCP_MAX_SESSIONS`
   (default 100) caps concurrent sessions and idle transports are reaped with
   the session TTL.

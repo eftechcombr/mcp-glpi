@@ -192,3 +192,107 @@ test('fetchAll() clamps maxRows and page size', async () => {
   const small = await search.search('Ticket', { fetchAll: true, maxRows: 0, limit: 10 });
   assert.equal(small.count, 1);
 });
+
+test('search rejects RSQL injection in string field names before calling GLPI', async () => {
+  const paths: string[] = [];
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    paths.push(new URL(url).pathname);
+    return new Response('[]', { status: 200 });
+  });
+
+  const search = authedSearch();
+  await assert.rejects(
+    () =>
+      search.search('Ticket', {
+        criteria: [{ field: 'name==1;status==closed', searchtype: 'equals', value: 'x' }],
+      }),
+    /Invalid search field/
+  );
+  assert.deepEqual(paths, []);
+});
+
+test('contains values stay inside the quoted wildcard literal', async () => {
+  let filter = '';
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    filter = new URL(url).searchParams.get('filter') ?? '';
+    return new Response('[]', { status: 200 });
+  });
+
+  const search = authedSearch();
+  await search.search('Ticket', {
+    criteria: [{ field: 'name', searchtype: 'contains', value: 'a;status==closed' }],
+  });
+
+  assert.equal(filter, "name==*'a;status==closed'*");
+});
+
+test('search fails closed on unresolved fields and unknown operators', async () => {
+  installCatalogueFetch();
+  const http = authedHttp();
+  const cache = new SearchOptionsCache(http, 60000);
+  const search = new GlpiSearch(http, cache);
+
+  await assert.rejects(
+    () =>
+      search.search('Ticket', {
+        criteria: [{ field: 9999, searchtype: 'equals', value: 'x' }],
+      }),
+    /Unknown search field id 9999/
+  );
+
+  await assert.rejects(
+    () =>
+      search.search('Ticket', {
+        criteria: [{ field: 'name', searchtype: 'bogus' as any, value: 'x' }],
+      }),
+    /Unsupported searchtype/
+  );
+
+  await assert.rejects(
+    () =>
+      search.search('Ticket', {
+        criteria: [
+          { field: 'name', searchtype: 'equals', value: 'a' },
+          { field: 'status', searchtype: 'equals', value: 1, link: 'XOR' as any },
+        ],
+      }),
+    /Unsupported link/
+  );
+});
+
+test('wildcard characters in user values are escaped', async () => {
+  const filters: string[] = [];
+  installFetch(async (url) => {
+    if (url.endsWith('/token')) {
+      return new Response(
+        JSON.stringify({ access_token: 'tok-s', token_type: 'bearer', expires_in: 3600 }),
+        { status: 200 }
+      );
+    }
+    filters.push(new URL(url).searchParams.get('filter') ?? '');
+    return new Response('[]', { status: 200 });
+  });
+
+  const search = authedSearch();
+  await search.search('Ticket', {
+    criteria: [{ field: 'name', searchtype: 'equals', value: 'a*b' }],
+  });
+  await search.search('Ticket', {
+    criteria: [{ field: 'name', searchtype: 'contains', value: 'a*b' }],
+  });
+
+  assert.equal(filters[0], "name=='a\\*b'");
+  assert.equal(filters[1], "name==*'a\\*b'*");
+});

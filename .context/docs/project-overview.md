@@ -89,6 +89,8 @@ All public API symbols are listed in `codebase-map.json`. Major exports include:
 - Each session gets its own MCP server instance and transport, so clients can
   initialize concurrently and tear one down without affecting the others.
   `MCP_MAX_SESSIONS` (default 100) caps concurrency.
+- Loopback binds validate `Host`/`Origin` (`MCP_ALLOWED_HOSTS` for extra names)
+  and requests are rate-limited per session/IP (`MCP_RATE_LIMIT_PER_MINUTE`).
 - With `GLPI_URL` set, every session shares that GLPI instance (single-tenant).
 - With `GLPI_URL` unset, the server is multi-tenant: each client calls
   `glpi_configure_connection` and credentials live in memory only.

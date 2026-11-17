@@ -92,11 +92,16 @@ GLPI High-Level API search uses **RSQL** in the `filter` query parameter:
 
 Criteria are linked with `;` (AND) and `,` (OR). `AND NOT` / `OR NOT` are
 emitted as `;not(...)` / `,not(...)`. Values containing RSQL metacharacters
-are single-quoted, with `'` escaped.
+are single-quoted, with backslashes and `*` escaped; `contains`/`notcontains`
+values cannot widen their wildcard match.
 
 Field references may be numeric ids (resolved through `SearchOptionsCache`),
-friendly names, or raw column names. When a catalogue is unavailable, raw
-names are used as-is.
+friendly names, or raw column names. Field names must match
+`^[A-Za-z_][A-Za-z0-9_.]*$` — anything containing RSQL operators is rejected
+with `InvalidParams`. Unresolved numeric ids and unknown searchtypes/links also
+fail closed instead of being silently dropped; on GLPI v3, where
+`/listSearchOptions` is unavailable, use property names rather than numeric
+ids.
 
 ## Field catalogue
 

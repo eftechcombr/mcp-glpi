@@ -343,6 +343,25 @@ function optionalId(value: unknown, name = 'id'): number | undefined {
   return requireId(value, name);
 }
 
+/**
+ * Copy only the named fields that were provided.
+ *
+ * Tool arguments are arbitrary JSON; forwarding the whole object to GLPI would
+ * let a caller set fields the tool does not expose (mass assignment), including
+ * assignment/owner columns such as `_users_id_assign`.
+ */
+function pick(
+  args: Record<string, unknown> | undefined,
+  keys: readonly string[]
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!args) return out;
+  for (const key of keys) {
+    if (args[key] !== undefined) out[key] = args[key];
+  }
+  return out;
+}
+
 /** Validate that an itemtype string is known, preventing path traversal. */
 function validateItemtype(itemtype: string): asserts itemtype is string {
   if (!VALID_ITEMTYPES.has(itemtype as any)) {
@@ -1752,10 +1771,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           with_documents: args.with_documents as boolean,
         }));
       case 'glpi_create_computer':
-        return text({ success: true, ...(await client.createComputer(args)) });
+        return text({
+          success: true,
+          ...(await client.createComputer(
+            pick(args, [
+              'name', 'serial', 'otherserial', 'contact', 'comment',
+              'locations_id', 'states_id', 'computertypes_id', 'manufacturers_id',
+            ])
+          )),
+        });
       case 'glpi_update_computer': {
         const id = requireId(args.id);
-        const updates = { ...args }; delete (updates as any).id;
+        const updates = pick(args, ['name', 'serial', 'comment', 'locations_id', 'states_id']);
         await client.updateComputer(id, updates as any);
         return text({ success: true, id });
       }
@@ -1768,7 +1795,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case 'glpi_get_software':
         return text(await client.getSoftware(requireId(args.id)));
       case 'glpi_create_software':
-        return text({ success: true, ...(await client.createSoftware(args)) });
+        return text({
+          success: true,
+          ...(await client.createSoftware(
+            pick(args, ['name', 'comment', 'manufacturers_id', 'softwarecategories_id'])
+          )),
+        });
 
       case 'glpi_list_network_equipments':
         return text(await client.getNetworkEquipments(parseListArgs(args)));
@@ -1814,28 +1846,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case 'glpi_get_contract':
         return text(await client.getContract(requireId(args.id)));
       case 'glpi_create_contract':
-        return text({ success: true, ...(await client.createContract(args)) });
+        return text({
+          success: true,
+          ...(await client.createContract(
+            pick(args, ['name', 'num', 'begin_date', 'duration', 'notice', 'comment'])
+          )),
+        });
 
       case 'glpi_list_suppliers':
         return text(await client.getSuppliers(parseListArgs(args)));
       case 'glpi_get_supplier':
         return text(await client.getSupplier(requireId(args.id)));
       case 'glpi_create_supplier':
-        return text({ success: true, ...(await client.createSupplier(args)) });
+        return text({
+          success: true,
+          ...(await client.createSupplier(
+            pick(args, [
+              'name', 'address', 'postcode', 'town', 'country', 'website',
+              'phonenumber', 'email',
+            ])
+          )),
+        });
 
       case 'glpi_list_locations':
         return text(await client.getLocations(parseListArgs(args)));
       case 'glpi_get_location':
         return text(await client.getLocation(requireId(args.id)));
       case 'glpi_create_location':
-        return text({ success: true, ...(await client.createLocation(args)) });
+        return text({
+          success: true,
+          ...(await client.createLocation(
+            pick(args, ['name', 'address', 'postcode', 'town', 'building', 'room', 'locations_id'])
+          )),
+        });
 
       case 'glpi_list_projects':
         return text(await client.getProjects(parseListArgs(args)));
       case 'glpi_get_project':
         return text(await client.getProject(requireId(args.id)));
       case 'glpi_create_project':
-        return text({ success: true, ...(await client.createProject(args)) });
+        return text({
+          success: true,
+          ...(await client.createProject(
+            pick(args, [
+              'name', 'code', 'content', 'priority', 'plan_start_date',
+              'plan_end_date', 'users_id', 'groups_id',
+            ])
+          )),
+        });
       case 'glpi_update_project': {
         const id = requireId(args.id);
         const updates: Record<string, unknown> = {};

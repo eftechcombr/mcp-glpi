@@ -1,3 +1,4 @@
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { GlpiHttp } from './http.js';
 import { SearchOptionsCache } from './search-options.js';
 
@@ -66,8 +67,8 @@ const RSQL_LINK_MAP: Record<string, string> = {
 const SEARCHTYPE_RSQL_MAP: Record<string, (prop: string, value: string) => string> = {
   equals: (prop, v) => `${prop}==${v}`,
   notequals: (prop, v) => `${prop}!=${v}`,
-  contains: (prop, v) => `${prop}==*${escapeRsqlValue(v)}*`,
-  notcontains: (prop, v) => `${prop}!=*${escapeRsqlValue(v)}*`,
+  contains: (prop, v) => `${prop}==*${v}*`,
+  notcontains: (prop, v) => `${prop}!=*${v}*`,
   morethan: (prop, v) => `${prop}=gt=${v}`,
   lessthan: (prop, v) => `${prop}=lt=${v}`,
   empty: (prop) => `${prop}==''`,
@@ -77,12 +78,11 @@ const SEARCHTYPE_RSQL_MAP: Record<string, (prop: string, value: string) => strin
 };
 
 /**
- * Escape special RSQL characters in a value used inside wildcard patterns.
- * This is used by contains/notcontains search types.
+ * RSQL property names may contain letters, digits, underscores, and dotted
+ * segments. Anything else (operators, quotes, separators) would let a caller
+ * inject additional filter expressions.
  */
-function escapeRsqlValue(v: string): string {
-  return v.replace(/'/g, "\\'").replace(/\*/g, '\\*');
-}
+const PROPERTY_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)*$/;
 
 /**
  * Format a value for use in RSQL filter expressions.
@@ -92,21 +92,24 @@ function escapeRsqlValue(v: string): string {
  *   - Single-quoted strings for values containing special characters
  *   - Backslash-escaped single quotes inside quoted strings
  *
- * This function ensures all values are properly encoded to prevent RSQL injection.
- * It ALWAYS quotes string values that contain RSQL special characters,
- * regardless of whether they start with a quote character.
+ * This function ensures all values are properly encoded to prevent RSQL
+ * injection. It ALWAYS quotes string values that contain RSQL special
+ * characters, regardless of whether they start with a quote character.
+ * Literal `*` and `\` characters are escaped so a caller cannot inject or
+ * widen a wildcard match.
  */
 function formatRsqlValue(v: string | number | boolean): string {
-  if (typeof v === 'string') {
-    // RSQL special characters that require quoting
-    const needsQuoting = /[&\|!=<>\(\)\;\*, ]/.test(v);
-    if (needsQuoting) {
-      // Escape single quotes inside the string, then wrap in single quotes
-      return `'${v.replace(/'/g, "\\'")}'`;
-    }
-    return v;
+  if (typeof v !== 'string') return String(v);
+
+  let value = v.replace(/\\/g, '\\\\').replace(/\*/g, '\\*');
+
+  // RSQL special characters that require quoting
+  const needsQuoting = /[&\|!=<>\(\)\;\*, ]/.test(value) || value.includes("'");
+  if (needsQuoting) {
+    // Escape single quotes inside the string, then wrap in single quotes
+    return `'${value.replace(/'/g, "\\'")}'`;
   }
-  return String(v);
+  return value;
 }
 
 export class GlpiSearch {
@@ -228,10 +231,17 @@ export class GlpiSearch {
     for (let i = 0; i < criteria.length; i++) {
       const c = criteria[i];
       const propName = await this.resolvePropertyName(itemtype, c.field);
-      if (!propName) continue;
 
       const builder = SEARCHTYPE_RSQL_MAP[c.searchtype];
-      if (!builder) continue;
+      if (!builder) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Unsupported searchtype: ${JSON.stringify(c.searchtype)}`
+        );
+      }
+      if (c.link !== undefined && !(c.link in RSQL_LINK_MAP)) {
+        throw new McpError(ErrorCode.InvalidParams, `Unsupported link: ${JSON.stringify(c.link)}`);
+      }
 
       const rsql = builder(propName, formatRsqlValue(c.value));
 
@@ -250,9 +260,33 @@ export class GlpiSearch {
     return parts.join('');
   }
 
-  private async resolvePropertyName(itemtype: string, field: number | string): Promise<string | null> {
-    if (typeof field === 'string') return field;
-    return this.searchOptions.resolvePropertyName(itemtype, field);
+  private async resolvePropertyName(
+    itemtype: string,
+    field: number | string
+  ): Promise<string> {
+    if (typeof field === 'string') {
+      return this.validatePropertyName(field);
+    }
+    const resolved = await this.searchOptions.resolvePropertyName(itemtype, field);
+    if (!resolved) {
+      // Fail closed: silently dropping a criterion would broaden the result set
+      // (for example, a status filter would vanish and return every row).
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Unknown search field id ${field} for ${itemtype}`
+      );
+    }
+    return this.validatePropertyName(resolved);
+  }
+
+  private validatePropertyName(name: string): string {
+    if (!PROPERTY_NAME_RE.test(name)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Invalid search field: ${JSON.stringify(name)}`
+      );
+    }
+    return name;
   }
 
   private itemtypeToPath(itemtype: string): string {

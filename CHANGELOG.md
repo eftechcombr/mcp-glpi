@@ -22,10 +22,27 @@
   at most 1000 rows, preventing oversized responses and upstream load.
 - **Bounded HTTP sessions**: `MCP_MAX_SESSIONS` (default 100) caps concurrent
   MCP sessions, and idle transports are reaped with the session TTL.
+- **RSQL injection hardening**: string `field` names must be simple property
+  names, `contains`/`notcontains` values can no longer escape their wildcard
+  literal, and unknown searchtypes/links are rejected instead of ignored.
+- **Fail-closed search criteria**: unresolved field ids and unknown operators
+  now raise `InvalidParams` rather than silently dropping the criterion and
+  broadening the result set. Use property names on GLPI v3, where the
+  search-options catalogue is unavailable.
+- **No mass assignment**: create/update tools for computers, software,
+  contracts, suppliers, locations, and projects forward only the fields they
+  document, so arbitrary GLPI columns (for example `_users_id_assign`) cannot
+  be set through `arguments`.
+- **DNS-rebinding and abuse protection**: loopback binds validate `Host`/`Origin`
+  (`MCP_ALLOWED_HOSTS` for extra names), and requests are rate-limited per
+  session/IP (`MCP_RATE_LIMIT_PER_MINUTE`, default 120/min, `429` + `Retry-After`).
+- **Supply-chain pinning**: GitHub Actions are pinned by commit SHA and the
+  Docker base image by digest.
 - **Dependency upgrade**: `@modelcontextprotocol/sdk` 1.32.2 (from 1.29.0) and
-  `zod` 4.6.6, plus an `@hono/node-server` 2.1.9 override, clearing every
-  high/critical `bun audit` advisory. One moderate advisory remains in
-  `minimatch`, pulled in only by the ESLint/TypeScript-ESLint dev toolchain.
+  `zod` 4.6.6, plus an `@hono/node-server` 2.1.9 override. `bun audit
+  --production` reports no vulnerabilities; the remaining advisories
+  (`minimatch`, `picomatch`) are dev-tooling transitives with no patched
+  release yet, so CI gates on production dependencies at high severity.
 
 ### Fixed
 
