@@ -75,8 +75,8 @@ v3 uses GLPI's OAuth2 API. You need an OAuth2 client configured in GLPI
 {
   "mcpServers": {
     "glpi": {
-      "command": "bunx",
-      "args": ["mcp-glpi"],
+      "command": "bun",
+      "args": ["run", "/path/to/mcp-glpi/dist/index.js"],
       "env": {
         "GLPI_URL": "https://glpi.example.com",
         "GLPI_AUTH_METHOD": "password",
