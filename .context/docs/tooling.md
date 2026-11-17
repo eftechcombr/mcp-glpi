@@ -19,6 +19,10 @@ bun run build          # Compile TypeScript → dist/
 # Dev mode (bun, no compilation step)
 bun run dev
 
+# Hosted Streamable HTTP mode (multi-tenant when GLPI_URL is unset)
+bun run start:http
+# equivalent to: MCP_TRANSPORT=http bun run dist/index.js
+
 # Lint
 bun run lint           # Check lint rules
 bun run lint:fix       # Auto-fix lint issues
@@ -48,4 +52,4 @@ bun run watch          # tsc --watch
 - Run `bun run lint` before committing to catch formatting issues early.
 - Store generated artefacts in `.context/` for deterministic reruns.
 - When debugging HTTP interactions, set `GLPI_DEBUG=1` to log retries and re-auth to stderr.
-- The MCP server uses `stdio` transport — all debugging output goes to stderr, leaving stdout clean for the protocol.
+- The MCP server defaults to the `stdio` transport — all debugging output goes to stderr, leaving stdout clean for the protocol. In HTTP mode (`MCP_TRANSPORT=http`) the same logging goes to stderr and the endpoint is served at `MCP_PATH` (default `/mcp`).

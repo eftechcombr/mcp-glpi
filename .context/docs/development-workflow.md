@@ -6,7 +6,7 @@ This project follows a trunk-based development model with short-lived feature br
 
 - **Main branch**: `main` — always releasable. Direct commits are discouraged.
 - **Feature branches**: Named `feat/<description>` or `fix/<description>`. Branched from `main`, merged via PR.
-- **Releases**: Published to npm on demand via `npm publish`. Tagged with semver (`v3.2.0`, etc.).
+- **Releases**: Published to npm on demand via `npm publish`. Tagged with semver (`v3.5.0`, etc.). Record user-visible changes in `CHANGELOG.md` first.
 - **Changelog**: See [`CHANGELOG.md`](../../CHANGELOG.md) for release history.
 
 ## Local Development
@@ -33,6 +33,9 @@ bun test --watch
 
 # Run smoke test (requires GLPI env vars)
 bun run smoke
+
+# Run the server as a hosted Streamable HTTP endpoint
+MCP_TRANSPORT=http PORT=3000 bun start
 ```
 
 ## Code Review Expectations

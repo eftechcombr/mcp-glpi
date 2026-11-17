@@ -731,7 +731,7 @@ export class GlpiClient {
     const result = await this.search.search<GlpiUser>('User', {
       criteria: [
         {
-          field: 8,
+          field: 'is_active',
           searchtype: 'equals',
           value: options.is_active ? 1 : 0,
         },

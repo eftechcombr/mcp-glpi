@@ -19,16 +19,26 @@
 - Confirm the built artefacts in `dist/` match the new source changes.
 
 ## Repository map
-- `CHANGELOG.md/` — explain what lives here and when agents should edit it.
-- `LICENSE/` — explain what lives here and when agents should edit it.
-- `package-lock.json/` — explain what lives here and when agents should edit it.
-- `package.json/` — explain what lives here and when agents should edit it.
-- `README.md/` — explain what lives here and when agents should edit it.
-- `scripts/` — explain what lives here and when agents should edit it.
-- `src/` — explain what lives here and when agents should edit it.
-- `test/` — explain what lives here and when agents should edit it.
+- `src/index.ts` — MCP server: tool catalogue, dispatch, resources, entry point.
+- `src/http.ts` — unified HTTP layer (OAuth2, retries, timeouts, `GlpiError`).
+- `src/search.ts` — RSQL search engine, pagination, `ITEMTYPE_PATH_MAP`.
+- `src/search-options.ts` — cached `/listSearchOptions` field catalogue.
+- `src/glpi-client.ts` — typed domain client for GLPI itemtypes.
+- `src/sessions.ts` — per-session `GlpiClient` registry for HTTP mode.
+- `src/http-server.ts` — Streamable HTTP transport (Bun `serve`).
+- `test/` — `bun test` specs for HTTP, search, and session behaviour.
+- `scripts/smoke.ts` — manual/live integration smoke test (`bun run smoke`).
+- `dist/` — compiled CommonJS output; regenerate with `bun run build`.
+- `.context/` — AI development scaffolding: docs, agent playbooks, skills.
+- `README.md` — user-facing docs: configuration, tool catalogue, Docker.
+- `CHANGELOG.md` — release history; add an entry for every user-visible change.
+- `LICENSE` — MIT licence text; edit only when the licence actually changes.
+- `package.json` — package metadata, scripts, dependencies, published files.
+- `bun.lock` — Bun lockfile; regenerate with `bun install`, do not edit by hand.
+- `Dockerfile` / `docker-compose.yml` — container image and local/compose setups.
 
 ## AI Context References
 - Documentation index: `.context/docs/README.md`
 - Agent playbooks: `.context/agents/README.md`
-- Contributor guide: `CONTRIBUTING.md`
+- Development workflow: `.context/docs/development-workflow.md`
+- Testing strategy: `.context/docs/testing-strategy.md`

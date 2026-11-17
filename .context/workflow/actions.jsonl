@@ -56,3 +56,6 @@
 {"timestamp":"2026-07-10T03:21:26.609Z","tool":"context","action":"getMap","status":"success","details":{"params":{"action":"getMap"},"result":{"success":true}}}
 {"timestamp":"2026-07-10T03:21:29.150Z","tool":"context","action":"fill","status":"success","details":{"params":{"action":"fill","target":"docs"},"result":{"success":true}}}
 {"timestamp":"2026-07-10T03:21:31.920Z","tool":"context","action":"fill","status":"success","details":{"params":{"action":"fill","target":"docs","offset":3},"result":{"success":true}}}
+{"timestamp":"2026-11-17T10:23:13.106Z","tool":"agent","action":"discover","status":"success","details":{"params":{"action":"discover"},"result":{"success":true}}}
+{"timestamp":"2026-11-17T10:23:13.147Z","tool":"agent","action":"getDocs","status":"success","details":{"params":{"action":"getDocs","agent":"feature-developer"}}}
+{"timestamp":"2026-11-17T10:23:13.175Z","tool":"agent","action":"getInfo","status":"success","details":{"params":{"action":"getInfo","agentType":"feature-developer"},"result":{"success":true}}}
