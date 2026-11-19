@@ -31,6 +31,7 @@ import { GlpiError, normalizeApiVersion, normalizeGlpiUrl } from './http.js';
 import { SearchCriterion, SearchType, SearchLink } from './search.js';
 import { SessionManager } from './sessions.js';
 import { startHttpServer } from './http-server.js';
+import { assertAllowedGlpiUrl } from './security.js';
 
 // ---------------------------------------------------------------------------
 // Validation Schemas
@@ -1365,14 +1366,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           );
         }
         const raw = connectionSchema.parse(args);
+        assertAllowedGlpiUrl(raw.url, process.env.GLPI_URL, process.env.GLPI_ALLOWED_HOSTS);
         const config = buildClientConfig(raw);
         const candidate = new GlpiClient(config);
         try {
           await candidate.initSession();
-        } catch (error) {
+        } catch {
           throw new McpError(
             ErrorCode.InvalidParams,
-            `Connection failed: ${error instanceof Error ? error.message : String(error)}`
+            'Connection failed. Check the GLPI URL and credentials, then review server-side diagnostics.'
           );
         }
         await sessionManager.remove(sessionId);
@@ -2136,17 +2138,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for ${name}: ${issues}`);
     }
     if (error instanceof GlpiError) {
-      const detail = error.glpiCode
-        ? `${error.glpiCode}${error.glpiMessage ? ' — ' + error.glpiMessage : ''}`
-        : error.message;
       throw new McpError(
         ErrorCode.InternalError,
-        `GLPI API error on ${name} (HTTP ${error.status}): ${detail}`
+        `GLPI API request failed for ${name} (HTTP ${error.status}).`
       );
     }
     throw new McpError(
       ErrorCode.InternalError,
-      `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`
+      `Error executing ${name}. Check server-side diagnostics.`
     );
   }
 });
@@ -2215,7 +2214,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
     if (error instanceof McpError) throw error;
     throw new McpError(
       ErrorCode.InternalError,
-      `Error reading resource: ${error instanceof Error ? error.message : String(error)}`
+      'Error reading resource. Check server-side diagnostics.'
     );
   }
 });

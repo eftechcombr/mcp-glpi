@@ -101,6 +101,9 @@ Two operating modes:
   uses that one GLPI instance.
 - **Multi-tenant** — leave `GLPI_URL` **unset**; each client configures its own
   GLPI connection for its session by calling `glpi_configure_connection`.
+  Configure `GLPI_ALLOWED_HOSTS` with the exact approved GLPI hostnames (or
+  `hostname:port` values); per-session destinations outside this list are
+  rejected. Do not allow broad or user-controlled host patterns.
   Credentials live in memory only, are never logged, and the in-memory token
   is cleared when the session closes (DELETE) or expires (GLPI-side token
   expiry still governs the token's lifetime).
@@ -132,7 +135,8 @@ Two operating modes:
 | `MCP_AUTH_TOKEN` | — | Require `Authorization: Bearer <token>` on the MCP endpoint |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Allow a non-loopback bind without a token (not recommended) |
 | `MCP_ALLOWED_HOSTS` | — | Comma-separated extra `Host`/`Origin` values to accept (reverse proxies) |
-| `MCP_RATE_LIMIT_PER_MINUTE` | `120` | Request cap per session/IP; `0` disables the limiter |
+| `GLPI_ALLOWED_HOSTS` | — | Exact comma-separated GLPI destination hosts permitted for per-session connections; required when `GLPI_URL` is unset |
+| `MCP_RATE_LIMIT_PER_MINUTE` | `120` | Request cap per session/IP; `0` disables the limiter; values must be integers from 0 to 1,000,000 |
 | `MCP_MAX_SESSIONS` | `100` | Max concurrent MCP sessions before new initializes get `503` |
 | `SESSION_TTL_MS` | `86400000` | Session idle TTL in ms before its GLPI client is evicted |
 
@@ -569,6 +573,7 @@ docker run -d --name mcp-glpi-http \
   -e HOST=0.0.0.0 \
   -e PORT=3000 \
   -e MCP_AUTH_TOKEN="<random-token>" \
+  -e GLPI_ALLOWED_HOSTS="glpi.example.com" \
   -e SESSION_TTL_MS=86400000 \
   ghcr.io/eftechcombr/mcp-glpi:latest
 ```

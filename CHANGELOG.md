@@ -4,6 +4,14 @@
 
 ### Security
 
+- **Per-session GLPI destination allowlist**: `glpi_configure_connection` now
+  accepts only the configured `GLPI_URL` origin in single-tenant mode; in
+  multi-tenant mode, operators must set `GLPI_ALLOWED_HOSTS` to exact approved
+  hostnames (or host:port values), mitigating server-side request forgery.
+- **Sanitized MCP errors**: upstream and unexpected exception details are no
+  longer returned to MCP clients.
+- **Validated HTTP limits**: port, rate-limit, and concurrent-session settings
+  now reject malformed or out-of-range integer values at startup.
 - **HTTP transport authentication**: the Streamable HTTP endpoint now accepts
   `MCP_AUTH_TOKEN` and requires `Authorization: Bearer <token>` on `MCP_PATH`.
   The server binds to `127.0.0.1` by default and refuses to start on a
