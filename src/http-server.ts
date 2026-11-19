@@ -2,6 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { SessionManager } from './sessions.js';
+import { parseBoundedEnvInt } from './security.js';
 
 export type ServerFactory = () => Server;
 
@@ -12,13 +13,6 @@ interface SessionTransport {
 }
 
 const DEFAULT_MAX_SESSIONS = 100;
-
-function envInt(name: string): number | undefined {
-  const raw = process.env[name];
-  if (!raw) return undefined;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : undefined;
-}
 
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === '::1' || host === 'localhost';
@@ -81,11 +75,15 @@ export async function startHttpServer(
   const allowUnauthenticated = /^(1|true|yes)$/i.test(
     process.env.MCP_ALLOW_UNAUTHENTICATED ?? ''
   );
-  const port = envInt('PORT') ?? envInt('MCP_PORT') ?? 3000;
+  const port = parseBoundedEnvInt('PORT', process.env.PORT ?? process.env.MCP_PORT, 3000, 1, 65535);
   const mcpPath = process.env.MCP_PATH ?? '/mcp';
   const basePath = mcpPath.startsWith('/') ? mcpPath : `/${mcpPath}`;
-  const maxSessions = envInt('MCP_MAX_SESSIONS') ?? DEFAULT_MAX_SESSIONS;
-  const rateLimitPerMinute = envInt('MCP_RATE_LIMIT_PER_MINUTE') ?? 120;
+  const maxSessions = parseBoundedEnvInt(
+    'MCP_MAX_SESSIONS', process.env.MCP_MAX_SESSIONS, DEFAULT_MAX_SESSIONS, 1, 100_000
+  );
+  const rateLimitPerMinute = parseBoundedEnvInt(
+    'MCP_RATE_LIMIT_PER_MINUTE', process.env.MCP_RATE_LIMIT_PER_MINUTE, 120, 0, 1_000_000
+  );
 
   // Host/Origin allowlist. DNS-rebinding protection matters most for loopback
   // binds, where a malicious web page can target 127.0.0.1 through its own
