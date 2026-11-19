@@ -67,8 +67,11 @@ const RSQL_LINK_MAP: Record<string, string> = {
 const SEARCHTYPE_RSQL_MAP: Record<string, (prop: string, value: string) => string> = {
   equals: (prop, v) => `${prop}==${v}`,
   notequals: (prop, v) => `${prop}!=${v}`,
-  contains: (prop, v) => `${prop}==*${v}*`,
-  notcontains: (prop, v) => `${prop}!=*${v}*`,
+  // GLPI's RSQL engine treats `*` in `==` as a literal character, so wildcard
+  // matching has to go through the explicit `like`/`ilike` operators. `ilike`
+  // keeps the case-insensitive behaviour callers expect from a contains search.
+  contains: (prop, v) => `${prop}=ilike=*${v}*`,
+  notcontains: (prop, v) => `${prop}=notilike=*${v}*`,
   morethan: (prop, v) => `${prop}=gt=${v}`,
   lessthan: (prop, v) => `${prop}=lt=${v}`,
   empty: (prop) => `${prop}==''`,
@@ -110,6 +113,19 @@ function formatRsqlValue(v: string | number | boolean): string {
     return `'${value.replace(/'/g, "\\'")}'`;
   }
   return value;
+}
+
+/**
+ * Format a value that sits inside a `like`/`ilike` wildcard (`*value*`).
+ *
+ * GLPI treats quotes inside a wildcard as literal characters, so quoting the
+ * value breaks the match (`=ilike=*'abc'*` never matches). Instead, RSQL
+ * separators and operators are backslash-escaped, and `*`/`\` are escaped so a
+ * caller cannot widen or break out of the wildcard.
+ */
+function formatWildcardValue(v: string | number | boolean): string {
+  if (typeof v !== 'string') return String(v);
+  return v.replace(/[\\*;,()=!<>]/g, '\\$&');
 }
 
 export class GlpiSearch {
@@ -243,7 +259,11 @@ export class GlpiSearch {
         throw new McpError(ErrorCode.InvalidParams, `Unsupported link: ${JSON.stringify(c.link)}`);
       }
 
-      const rsql = builder(propName, formatRsqlValue(c.value));
+      const wildcard = c.searchtype === 'contains' || c.searchtype === 'notcontains';
+      const rsql = builder(
+        propName,
+        wildcard ? formatWildcardValue(c.value) : formatRsqlValue(c.value)
+      );
 
       if (i > 0 && c.link) {
         const separator = RSQL_LINK_MAP[c.link] ?? ';';
